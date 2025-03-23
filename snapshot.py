@@ -4,6 +4,7 @@ import io
 import csv
 import json
 import requests
+import time
 import discord
 
 from discord import app_commands
@@ -22,7 +23,6 @@ API_KEY = os.getenv("API_KEY")
 SERVICE_ACCOUNT_INFO = os.getenv("SERVICE_ACCOUNT_INFO")
 
 # Setup Google Sheets client
-# We assume the user has "snapshot_bot_log" spreadsheet with a "log" sheet.
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(SERVICE_ACCOUNT_INFO)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -35,7 +35,6 @@ worksheet = sh.worksheet("log")
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# We'll use app_commands (slash commands) within a Cog
 class SnapshotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -70,39 +69,49 @@ class SnapshotCog(commands.Cog):
             response = requests.get(base_url, params=params)
             data = response.json()
 
-            # If the API status is not "1" or result is empty, break out
+            # If the API status is not "1" or result is empty, break
             if data.get("status") != "1" or not data.get("result"):
                 break
 
             result_list = data["result"]
 
             for holder in result_list:
-                address = holder["TokenHolderAddress"]
-                quantity_str = holder["TokenHolderQuantity"]
-                quantity = float(quantity_str)
-                all_holders.append((address, quantity))
-                total_supply += quantity
+                quantity_float = float(holder["TokenHolderQuantity"])
+                # Convert to string (no decimal if integer, otherwise keep decimal)
+                if quantity_float.is_integer():
+                    quantity_str = str(int(quantity_float))
+                else:
+                    quantity_str = str(quantity_float)
 
-            # Check how many items were returned
+                # Add to the main list
+                all_holders.append((holder["TokenHolderAddress"], quantity_str))
+
+                # Sum up as float
+                total_supply += quantity_float
+
+            # If fewer than 'offset' holders returned, we must be at the last page
             if len(result_list) < offset:
                 break
 
             page += 1
 
-            # [Optional] Limit to 30000 holders (300 pages) - disabled by default
+            # [Optional] Limit to 30000 holders (300 pages) - commented out for now
             # if len(all_holders) >= 30000:
-            #    break
+            #     break
+
+            # Add a short delay before next page request
+            time.sleep(0.2)
 
         # Create an in-memory CSV
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
-        for address, qty in all_holders:
-            writer.writerow([address, qty])
+        for address, qty_str in all_holders:
+            writer.writerow([address, qty_str])
 
-        csv_buffer.seek(0)  # Reset pointer to the beginning of the CSV data
+        csv_buffer.seek(0)  # Reset pointer to start
 
-        # Prepare the ephemeral response content
+        # Prepare ephemeral response
         total_holders = len(all_holders)
         summary_text = (
             f"**Contract Address**: {contract_address}\n"
@@ -111,15 +120,14 @@ class SnapshotCog(commands.Cog):
             "Your CSV file is attached below."
         )
 
-        # Log to Google Sheets (append a new row)
-        # Example of logging: [Username, Contract, HolderCount, Supply]
+        # Log to Google Sheets
         user_name = str(interaction.user)
         worksheet.append_row(
             [user_name, contract_address, str(total_holders), str(total_supply)],
             value_input_option="RAW"
         )
 
-        # Attach the CSV as a file
+        # Attach CSV as a file
         file_to_send = discord.File(fp=csv_buffer, filename="holderList.csv")
 
         await interaction.followup.send(
@@ -130,15 +138,12 @@ class SnapshotCog(commands.Cog):
 
 async def setup_bot():
     await bot.add_cog(SnapshotCog(bot))
-    # Sync application commands with Discord
-    # so that slash commands appear.
     await bot.tree.sync()
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("------")
-    # Sync commands each time the bot starts (optional, or move to a manual command)
     await bot.wait_until_ready()
     await setup_bot()
 
