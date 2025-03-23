@@ -1,72 +1,67 @@
-import os
-import io
-import csv
-import json
-import requests
 import discord
 from discord.ext import commands
-from discord import app_commands
+import requests
+import io
+import csv
+import os
+import datetime
+
+# For environment variables
 from dotenv import load_dotenv
+
+# For Google Sheets logging
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from google.oauth2.service_account import Credentials
 
-# --------------------------
-# 1. Load environment variables
-# --------------------------
+# Load .env
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_BASE_URL = "https://api.socialscan.io/monad-testnet/v1/developer/api"
+
+# Environment variables
+BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
+GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
 
-# Read Google service account credentials from .env
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-if not GOOGLE_CREDENTIALS:
-    raise ValueError("GOOGLE_CREDENTIALS not found in .env")
+# Create bot instance
+bot = commands.Bot(
+    command_prefix="!",  # Not necessary for slash commands but can keep for compatibility
+    intents=discord.Intents.default()
+)
 
-# --------------------------
-# 2. Set up Google Sheets client
-# --------------------------
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-
-try:
-    creds_dict = json.loads(GOOGLE_CREDENTIALS)
-except json.JSONDecodeError as e:
-    raise ValueError(f"Failed to parse GOOGLE_CREDENTIALS: {e}")
-
-credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-gspread_client = gspread.authorize(credentials)
-
-try:
-    # Open your spreadsheet by name (no SPREADSHEET_ID needed)
-    # Make sure the sheet name "snapshot_bot_log" exists in your account
-    SPREADSHEET = gspread_client.open("snapshot_bot_log")
-except Exception as e:
-    raise ValueError(f"Failed to open 'snapshot_bot_log': {e}")
-
-# We'll write logs to a worksheet named "log"
-WORKSHEET_NAME = "log"
-
-# --------------------------
-# 3. Discord bot setup
-# --------------------------
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-# --------------------------
-# 4. Helper functions
-# --------------------------
-def fetch_all_token_holders(contract_address: str, offset: int = 100):
+# Google Sheets setup
+def get_gspread_client():
     """
-    Repeatedly fetch holders from the API in pages until there's no more data or we hit a limit.
+    Authorize and return a gspread client using a service account JSON file.
+    The JSON file name/path is stored in GOOGLE_SERVICE_ACCOUNT_FILE.
+    """
+    credentials = Credentials.from_service_account_file(GOOGLE_SERVICE_ACCOUNT_FILE)
+    gc = gspread.authorize(credentials)
+    return gc
+
+def append_log_to_spreadsheet(contract_address, holder_count, total_supply):
+    """
+    Append a log entry to the 'snapshot_bot_log' spreadsheet, 'log' worksheet.
+    Columns example: [Timestamp, ContractAddress, HolderCount, TotalSupply]
+    """
+    gc = get_gspread_client()
+    # Open spreadsheet by name and select the worksheet named 'log'
+    sheet = gc.open("snapshot_bot_log").worksheet("log")
+
+    # Prepare a row to insert
+    current_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    row_data = [current_time, contract_address, holder_count, total_supply]
+    sheet.append_row(row_data)
+
+# Constants
+API_BASE_URL = "https://api.socialscan.io/monad-testnet/v1/developer/api"
+OFFSET = 100  # Number of records per page
+
+def fetch_all_token_holders(contract_address, offset=100):
+    """
+    Fetch all token holders across multiple pages.
     Returns a list of dicts: [{TokenHolderAddress, TokenHolderQuantity}, ...]
     """
     all_holders = []
     page = 1
-
-    # OPTIONAL: If you want to limit to 300 pages (30,000 holders), uncomment next line and check logic below
-    # MAX_PAGES = 300
 
     while True:
         url = (
@@ -74,17 +69,18 @@ def fetch_all_token_holders(contract_address: str, offset: int = 100):
             f"&contractaddress={contract_address}"
             f"&page={page}&offset={offset}&apikey={API_KEY}"
         )
-        resp = requests.get(url)
-        if resp.status_code != 200:
-            print(f"HTTP Error {resp.status_code}")
+        response = requests.get(url)
+        if response.status_code != 200:
+            print(f"HTTP Error: {response.status_code}")
             break
 
-        data = resp.json()
+        data = response.json()
         if data.get("status") != "1" or data.get("message") != "OK":
             break
 
         result = data.get("result", [])
         if not result:
+            # No more data
             break
 
         for holder in result:
@@ -95,12 +91,12 @@ def fetch_all_token_holders(contract_address: str, offset: int = 100):
 
         page += 1
 
-        # If you want to enforce up to 300 pages, uncomment below:
-        # if page > MAX_PAGES:
-        #    break
+        # Uncomment below if you want to limit to 300 pages (30,000 records)
+        # if page > 300:
+        #     print("Page limit of 300 reached. Stopping data fetch.")
+        #     break
 
     return all_holders
-
 
 def create_csv_in_memory(holders):
     """
@@ -113,84 +109,44 @@ def create_csv_in_memory(holders):
     for h in holders:
         writer.writerow(h)
 
-    # Convert to BytesIO so Discord can attach it
     csv_bytes = io.BytesIO(output.getvalue().encode("utf-8"))
     return csv_bytes
 
-
-def log_to_google_sheet(contract_address: str, holder_count: int, total_supply: float):
+@bot.slash_command(
+    name="snapshot",
+    description="Fetch holder info for a given contract address."
+)
+async def snapshot(ctx: discord.ApplicationContext, contract_address: str):
     """
-    Append a row to the 'log' worksheet in 'snapshot_bot_log'.
-    Columns: [Timestamp, ContractAddress, HolderCount, TotalSupply]
-    """
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        worksheet = SPREADSHEET.worksheet(WORKSHEET_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        # Create the worksheet if it doesn't exist
-        worksheet = SPREADSHEET.add_worksheet(title=WORKSHEET_NAME, rows="1000", cols="10")
-
-    # Append row to the bottom of the sheet
-    worksheet.append_row([now_str, contract_address, str(holder_count), str(total_supply)])
-
-
-# --------------------------
-# 5. Slash command
-# --------------------------
-@bot.slash_command(name="snapshot", description="Get holder list, total supply, and create an ephemeral CSV attachment.")
-async def snapshot_command(ctx: discord.ApplicationContext, contract_address: str):
-    """
-    Fetches all token holders for the given contract, calculates total supply & holder count,
-    logs to Google Sheets, and returns an ephemeral message with a CSV attachment.
+    Slash command to retrieve holders, total supply, and holder count for a contract address.
+    Sends an ephemeral response with a CSV file attachment and logs to Google Sheets.
     """
     await ctx.defer(ephemeral=True)
 
-    # 1) Fetch data from the API
-    holders = fetch_all_token_holders(contract_address)
+    holders = fetch_all_token_holders(contract_address, OFFSET)
     holder_count = len(holders)
     total_supply = sum(float(h["TokenHolderQuantity"]) for h in holders)
 
-    # 2) Create a CSV in memory
+    # Build a CSV in memory
     csv_file = create_csv_in_memory(holders)
 
-    # 3) Log usage to Google Sheets
-    #    (You might want to run this in a separate thread if you're worried about blocking,
-    #    but for simplicity, we do it directly.)
-    log_to_google_sheet(contract_address, holder_count, total_supply)
-
-    # 4) Prepare ephemeral message
+    # Create a response message
     message_content = (
         f"**Contract Address**: {contract_address}\n"
         f"**Holder Count**: {holder_count}\n"
         f"**Total Supply**: {total_supply}"
     )
 
+    # Send ephemeral response with the CSV attachment
     file = discord.File(csv_file, filename="holderList.csv")
-    await ctx.respond(content=message_content, file=file, ephemeral=True)
+    await ctx.respond(
+        content=message_content,
+        file=file,
+        ephemeral=True
+    )
 
+    # Log the result in Google Spreadsheet
+    append_log_to_spreadsheet(contract_address, holder_count, total_supply)
 
-# --------------------------
-# 6. Bot event: on_ready
-# --------------------------
-@bot.event
-async def on_ready():
-    print(f"Bot is online as {bot.user}")
-    # Sync slash commands (so they appear in Discord)
-    try:
-        await bot.tree.sync()
-        print("Slash commands synced!")
-    except Exception as e:
-        print(f"Error syncing slash commands: {e}")
-
-
-# --------------------------
-# 7. Main entry
-# --------------------------
-if __name__ == "__main__":
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN not found in .env.")
-    if not API_KEY:
-        raise ValueError("API_KEY not found in .env.")
-
-    bot.run(BOT_TOKEN)
+# Run the bot
+bot.run(BOT_TOKEN)
