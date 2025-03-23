@@ -1,4 +1,4 @@
-# bot.py (example)
+# bot.py
 import os
 import io
 import csv
@@ -45,7 +45,7 @@ class SnapshotCog(commands.Cog):
     )
     @app_commands.describe(contract_address="Enter the token contract address")
     async def snapshot(self, interaction: discord.Interaction, contract_address: str):
-        # Defer the response to keep it ephemeral until we send the final result
+        # Defer the response so it remains ephemeral until final output
         await interaction.response.defer(ephemeral=True)
 
         base_url = "https://api.socialscan.io/monad-testnet/v1/developer/api"
@@ -54,8 +54,8 @@ class SnapshotCog(commands.Cog):
         offset = 100
         page = 1
 
-        all_holders = []
-        total_supply = 0
+        # Dictionary to accumulate quantities by address
+        address_to_quantity = {}
 
         while True:
             params = {
@@ -69,50 +69,55 @@ class SnapshotCog(commands.Cog):
             response = requests.get(base_url, params=params)
             data = response.json()
 
-            # If the API status is not "1" or result is empty, break
+            # If the API status is not "1" or there's no result, break
             if data.get("status") != "1" or not data.get("result"):
                 break
 
             result_list = data["result"]
 
             for holder in result_list:
-                quantity_float = float(holder["TokenHolderQuantity"])
-                # Convert to string (no decimal if integer, otherwise keep decimal)
-                if quantity_float.is_integer():
-                    quantity_str = str(int(quantity_float))
+                raw_quantity_str = holder["TokenHolderQuantity"]
+                quantity_float = float(raw_quantity_str)
+
+                address = holder["TokenHolderAddress"]
+                # Accumulate quantity in the dictionary
+                if address not in address_to_quantity:
+                    address_to_quantity[address] = quantity_float
                 else:
-                    quantity_str = str(quantity_float)
+                    address_to_quantity[address] += quantity_float
 
-                # Add to the main list
-                all_holders.append((holder["TokenHolderAddress"], quantity_str))
-
-                # Sum up as float
-                total_supply += quantity_float
-
-            # If fewer than 'offset' holders returned, we must be at the last page
+            # If fewer than 'offset' holders are returned, we've reached the last page
             if len(result_list) < offset:
                 break
 
             page += 1
 
             # [Optional] Limit to 30000 holders (300 pages) - commented out for now
-            # if len(all_holders) >= 30000:
+            # if sum(1 for _ in address_to_quantity) >= 30000:
             #     break
 
-            # Add a short delay before next page request
+            # Short delay before next page
             time.sleep(0.2)
+
+        # Now compute the total supply by summing all quantities
+        total_supply = sum(address_to_quantity.values())
 
         # Create an in-memory CSV
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
-        for address, qty_str in all_holders:
-            writer.writerow([address, qty_str])
 
-        csv_buffer.seek(0)  # Reset pointer to start
+        for address, quantity_float in address_to_quantity.items():
+            # Convert quantity to integer if it's an integer value
+            if quantity_float.is_integer():
+                quantity_str = str(int(quantity_float))
+            else:
+                quantity_str = str(quantity_float)
+            writer.writerow([address, quantity_str])
 
-        # Prepare ephemeral response
-        total_holders = len(all_holders)
+        csv_buffer.seek(0)
+
+        total_holders = len(address_to_quantity)  # unique addresses
         summary_text = (
             f"**Contract Address**: {contract_address}\n"
             f"**Total Holders**: {total_holders}\n"
