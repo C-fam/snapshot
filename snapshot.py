@@ -1,4 +1,4 @@
-# bot.py
+# snapshot.py
 import os
 import io
 import csv
