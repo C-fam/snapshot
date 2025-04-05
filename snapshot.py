@@ -2,8 +2,7 @@ import os
 import io
 import csv
 import json
-import asyncio
-import aiohttp  # 並列リクエスト用
+import requests
 import discord
 import time
 
@@ -35,34 +34,6 @@ worksheet = sh.worksheet("log")
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-async def fetch_page(session, base_url, contract_address, page, offset, api_key):
-    """
-    指定した page のデータを非同期で取得し、JSON を返す。
-    エラーがあれば None を返す。
-    """
-    params = {
-        "module": "token",
-        "action": "tokenholderlist",
-        "contractaddress": contract_address,
-        "page": page,
-        "offset": offset,
-        "apikey": api_key
-    }
-    try:
-        async with session.get(base_url, params=params) as resp:
-            # status 200 以外なら失敗とみなす
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            # "status" が "1" でないなら失敗
-            if data.get("status") != "1":
-                return None
-            return data
-    except Exception:
-        return None
-
-
 class SnapshotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -74,117 +45,128 @@ class SnapshotCog(commands.Cog):
     @app_commands.describe(contract_address="Enter the token contract address")
     async def snapshot(self, interaction: discord.Interaction, contract_address: str):
         """
-        NFTのホルダーを最大10000人分、ページ分割で(ある程度)並列取得します。
-        大量にいる場合は時間がかかるのでご注意ください。
+        Retrieve up to 1000 NFT holders.
+        This may take a while if there are many holders.
+        (API is called at 0.5-second intervals)
         """
+        # Defer the response so it remains ephemeral until final output
         await interaction.response.defer(ephemeral=True)
 
-        # 進捗表示用のメッセージ
+        # Initial progress message
         progress_message = await interaction.followup.send(
-            content="Initializing...",
+            content="Fetching token holders... (page 1)",
             ephemeral=True
         )
 
         base_url = "https://api.socialscan.io/monad-testnet/v1/developer/api"
-        offset = 100        # 1ページあたり 100 件
-        max_holders = 10000 # 10000 ホルダーまで
+        module = "token"
+        action = "tokenholderlist"
+        offset = 100
+        page = 1
+
+        # 1) Collect all holder info (including duplicates) in a list
         all_holders = []
 
-        # 非同期 HTTP セッションを使う
-        async with aiohttp.ClientSession() as session:
-            # 何ページまで取得するか分からないので、ページ番号をインクリメントしながら進む
-            page = 1
-            consecutive_empty = 0  # 空ページが連続したら打ち切り
-            batch_size = 10        # 1度に並列実行するページ数(あまり多くしすぎると負荷がかかる)
-            
-            while len(all_holders) < max_holders:
-                # 進捗表示
-                await progress_message.edit(
-                    content=f"Fetching pages {page} ~ {page+batch_size-1} ... (collected {len(all_holders)} holders so far)"
-                )
+        # Stop if too many consecutive errors occur
+        max_consecutive_errors = 5
+        error_count = 0
 
-                # まとめてページを投げる
-                tasks = []
-                for p in range(page, page + batch_size):
-                    tasks.append(
-                        fetch_page(session, base_url, contract_address, p, offset, API_KEY)
-                    )
+        # Limit to 1000 holders
+        max_holders = 1000
 
-                results = await asyncio.gather(*tasks)
-                
-                # まとめて返ってきた結果を処理
-                any_new_data = False
-                for data in results:
-                    # fetch_page が None を返したら失敗またはデータなし
-                    if (data is None) or (not data.get("result")):
-                        consecutive_empty += 1
-                        # 2連続で空ならもう無いとみなしてブレイク
-                        if consecutive_empty >= 2:
-                            break
-                        continue
-                    else:
-                        consecutive_empty = 0  # リセット
+        while True:
+            # Update progress message
+            await progress_message.edit(content=f"Now reading page {page}...")
 
-                    # result にホルダー一覧が入っている
-                    result_list = data.get("result", [])
-                    for holder in result_list:
-                        address = holder["TokenHolderAddress"]
-                        quantity_float = float(holder["TokenHolderQuantity"])
-                        all_holders.append((address, quantity_float))
-                        
-                        # 10000ホルダーに達したら打ち切り
-                        if len(all_holders) >= max_holders:
-                            break
-                    if len(all_holders) >= max_holders:
-                        break
-                    
-                    # result_list が offset (=100) より少ない場合は最後のページと推定
-                    if len(result_list) < offset:
-                        consecutive_empty += 1
-                    else:
-                        any_new_data = True
+            params = {
+                "module": module,
+                "action": action,
+                "contractaddress": contract_address,
+                "page": page,
+                "offset": offset,
+                "apikey": API_KEY
+            }
+            response = requests.get(base_url, params=params)
 
-                    if consecutive_empty >= 2 or len(all_holders) >= max_holders:
-                        break
+            # If an error occurs, don't stop immediately
+            if response.status_code != 200:
+                error_count += 1
+                if error_count >= max_consecutive_errors:
+                    break
+                time.sleep(0.5)
+                continue  # retry the same page
 
-                # 大量ページの処理が終了 or limit到達
-                if not any_new_data or consecutive_empty >= 2 or len(all_holders) >= max_holders:
+            data = response.json()
+
+            # If API status is not "1" or no results returned
+            if data.get("status") != "1":
+                error_count += 1
+                if error_count >= max_consecutive_errors:
+                    break
+                time.sleep(0.5)
+                continue  # retry the same page
+            else:
+                # Reset error counter on success
+                error_count = 0
+
+            result_list = data.get("result")
+            if not result_list:
+                # No data -> end
+                break
+
+            for holder in result_list:
+                address = holder["TokenHolderAddress"]
+                quantity_float = float(holder["TokenHolderQuantity"])
+                all_holders.append((address, quantity_float))
+
+                # Stop at 1000
+                if len(all_holders) >= max_holders:
                     break
 
-                page += batch_size
-                # 過剰な速さで叩きすぎないよう、少しウェイト
-                # (まとめて叩いているので pageごとのsleep 0.5sec×10=5sec と同等くらい)
-                await asyncio.sleep(1.0)
+            if len(all_holders) >= max_holders:
+                break
 
-        # ---- 取得終了 ----
-        total_supply = int(sum(qty for _, qty in all_holders))
+            # If fewer results than offset, we've reached the final page
+            if len(result_list) < offset:
+                break
+
+            page += 1
+            time.sleep(0.5)
+
+        # 2) Calculate total supply as an integer
+        total_supply = int(sum(quantity for _, quantity in all_holders))
+
+        # 3) Total number of holders (including duplicates)
         total_holders = len(all_holders)
 
-        # CSV 作成
+        # 4) Create CSV
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
+
         for address, quantity_float in all_holders:
-            writer.writerow([address, str(int(quantity_float))])
+            quantity_str = str(int(quantity_float))  # truncate decimals
+            writer.writerow([address, quantity_str])
+
         csv_buffer.seek(0)
 
+        # 5) Summary text
         summary_text = (
             f"**Contract Address**: {contract_address}\n"
             f"**Total Holders**: {total_holders} (up to {max_holders})\n"
             f"**Total Supply**: {total_supply}\n\n"
             "Your CSV file is attached below.\n"
-            "※最大10000ホルダーまで対応しています。\n"
-            "**(Parallel fetch)**"
+            "Note: Only up to 1000 holders are supported."
         )
 
-        # ログ記録
+        # 6) Log to Google Sheets
         user_name = str(interaction.user)
         worksheet.append_row(
             [user_name, contract_address, str(total_holders), str(total_supply)],
             value_input_option="RAW"
         )
 
-        # 送信
+        # 7) Reply with CSV file
         file_to_send = discord.File(fp=csv_buffer, filename="holderList.csv")
         await progress_message.edit(content="Snapshot completed! Sending file...")
         await interaction.followup.send(
@@ -192,7 +174,6 @@ class SnapshotCog(commands.Cog):
             ephemeral=True,
             file=file_to_send
         )
-
 
 async def setup_bot():
     await bot.add_cog(SnapshotCog(bot))
