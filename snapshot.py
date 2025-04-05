@@ -257,14 +257,20 @@ class SnapshotCog(commands.Cog):
 
     @app_commands.command(
         name="register_wallet",
-        description="Admin only: create a button for users to register their wallet."
+        description="Admin only: create an embed+button for users to register their wallet."
     )
     @app_commands.checks.has_permissions(administrator=True)
-    async def register_wallet(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        channel="Select the channel to post the embed and button"
+    )
+    async def register_wallet(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """
         Admin command:
-        Posts an embed with a button that users can click to register their wallet.
+        Posts an embed (color #836EF9) and a button in the specified channel.
         """
+        # Defer the response in ephemeral mode, so the command usage isn't visible
+        await interaction.response.defer(ephemeral=True)
+
         # Embed の作成 (バーの色 #836EF9)
         embed = discord.Embed(
             title="Register your wallet",
@@ -274,12 +280,13 @@ class SnapshotCog(commands.Cog):
 
         view = RegisterWalletView(sh)  # Viewにスプレッドシートの参照を渡す
 
-        # このメッセージ自体は全体に見えるように送信 (ephemeral=False)
-        await interaction.response.send_message(
-            content=" ",
-            embed=embed,
-            view=view,
-            ephemeral=False
+        # チャンネルにメッセージを投稿 (全体に見える)
+        await channel.send(embed=embed, view=view)
+
+        # コマンド実行者にはエフェメラルで送信 (「投稿完了」など)
+        await interaction.followup.send(
+            content=f"Embed with a wallet registration button has been posted in {channel.mention}.",
+            ephemeral=True
         )
 
 async def setup_bot():
