@@ -4,6 +4,7 @@ import csv
 import json
 import requests
 import discord
+import time  # 追加
 
 from discord import app_commands
 from discord.ext import commands
@@ -83,11 +84,13 @@ class SnapshotCog(commands.Cog):
             if len(result_list) < offset:
                 break
 
+            # 次のページへ
             page += 1
-            # Delayは不要なので削除
+
+            # --- ここで 0.5 秒待機 ---
+            time.sleep(0.5)
 
         # --- 2) 合計サプライを整数で計算 ---
-        # 小数部は単純に切り捨て（int()）: 3.8 -> 3,  10.0 -> 10 など
         total_supply = int(sum(quantity for _, quantity in all_holders))
 
         # --- 3) ホルダー数（重複込み） ---
@@ -99,8 +102,7 @@ class SnapshotCog(commands.Cog):
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
 
         for address, quantity_float in all_holders:
-            # ホルダーごとの数量を整数に変換
-            quantity_str = str(int(quantity_float))  # 3.0 や 3.8 -> "3"
+            quantity_str = str(int(quantity_float))
             writer.writerow([address, quantity_str])
 
         csv_buffer.seek(0)
@@ -114,7 +116,6 @@ class SnapshotCog(commands.Cog):
         )
 
         # --- 6) Google Sheets ログに記録 ---
-        # ここもサプライは小数点なしで記録
         user_name = str(interaction.user)
         worksheet.append_row(
             [user_name, contract_address, str(total_holders), str(total_supply)],
