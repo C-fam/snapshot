@@ -175,6 +175,46 @@ class SnapshotCog(commands.Cog):
             file=file_to_send
         )
 
+    @app_commands.command(
+        name="register",
+        description="Register your wallet address."
+    )
+    @app_commands.describe(wallet="Enter your wallet address")
+    async def register(self, interaction: discord.Interaction, wallet: str):
+        """
+        Register your wallet address. This command is ephemeral
+        and will log your Discord name, ID, and wallet address
+        to the 'wallet_log' sheet.
+        """
+        # Ephemeral response
+        await interaction.response.defer(ephemeral=True)
+
+        # Discord user info
+        user_name = str(interaction.user)
+        user_id = str(interaction.user.id)
+        wallet_address = wallet.strip()
+
+        # Log to "wallet_log" sheet
+        try:
+            register_worksheet = sh.worksheet("wallet_log")
+        except gspread.WorksheetNotFound:
+            # If you want to create it automatically, uncomment below:
+            # register_worksheet = sh.add_worksheet(title="wallet_log", rows="100", cols="3")
+            await interaction.followup.send(
+                content="The sheet 'wallet_log' was not found. Please create it first.",
+                ephemeral=True
+            )
+            return
+
+        # Append row: [DiscordName, DiscordID, WalletAddress]
+        register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
+
+        # Send ephemeral success message in English
+        await interaction.followup.send(
+            content=f"Your wallet has been registered.\n**Name**: {user_name}\n**Wallet**: {wallet_address}",
+            ephemeral=True
+        )
+
 async def setup_bot():
     await bot.add_cog(SnapshotCog(bot))
     await bot.tree.sync()
