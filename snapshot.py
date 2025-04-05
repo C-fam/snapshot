@@ -94,7 +94,7 @@ class SnapshotCog(commands.Cog):
                 if error_count >= max_consecutive_errors:
                     # エラーが続きすぎたら中断
                     break
-                time.sleep(0.5)
+                time.sleep(0.6)
                 continue  # 同じページをリトライ
 
             data = response.json()
@@ -136,7 +136,7 @@ class SnapshotCog(commands.Cog):
             page += 1
 
             # リクエスト間隔 0.5秒
-            time.sleep(0.5)
+            time.sleep(0.6)
 
         # --- 2) 合計サプライを整数で計算 ---
         total_supply = int(sum(quantity for _, quantity in all_holders))
