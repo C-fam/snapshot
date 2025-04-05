@@ -72,7 +72,7 @@ class RegisterWalletModal(discord.ui.Modal):
             )
             return
 
-        # Check duplication
+        # Check duplication (can handle ~1000 rows or more)
         all_values = register_worksheet.get_all_values()
         existing_row = None
         for row in all_values:
@@ -153,7 +153,7 @@ class SnapshotCog(commands.Cog):
         offset = 100
         page = 1
 
-        # 1) Collect all holder info in a list
+        # 1) Collect all holder info
         all_holders = []
 
         # Stop if too many consecutive errors occur
@@ -259,20 +259,27 @@ class SnapshotCog(commands.Cog):
         name="register_wallet",
         description="Admin only: create a button for users to register their wallet."
     )
-    @app_commands.checks.has_permissions(administrator=True)  # 管理者限定
+    @app_commands.checks.has_permissions(administrator=True)
     async def register_wallet(self, interaction: discord.Interaction):
         """
         Admin command:
-        Posts a button that any user can click to register their wallet (ephemeral).
+        Posts an embed with a button that users can click to register their wallet.
         """
+        # Embed の作成 (バーの色 #836EF9)
+        embed = discord.Embed(
+            title="Register your wallet",
+            description="Click the button below to register your wallet.",
+            color=0x836EF9
+        )
+
         view = RegisterWalletView(sh)  # Viewにスプレッドシートの参照を渡す
-        # このメッセージは皆が見えるように ephemeral=False で送る
-        # ただし「すべての返答をエフェメラルで」という要望があれば
-        # Adminだけが見える形になってしまうので注意。
+
+        # このメッセージ自体は全体に見えるように送信 (ephemeral=False)
         await interaction.response.send_message(
-            content="Click the button below to register your wallet (ephemeral).",
+            content=" ",
+            embed=embed,
             view=view,
-            ephemeral=False  # ここをTrueにすると、Adminしかボタンを見れなくなる
+            ephemeral=False
         )
 
 async def setup_bot():
