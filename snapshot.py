@@ -104,7 +104,7 @@ class SnapshotCog(commands.Cog):
                 error_count += 1
                 if error_count >= max_consecutive_errors:
                     break
-                time.sleep(0.5)
+                time.sleep(0.6)
                 continue  # 同じページをリトライ
             else:
                 # 成功したらエラー連続カウントをリセット
