@@ -8,7 +8,6 @@ import time
 
 from discord import app_commands
 from discord.ext import commands
-from discord.ui import View, Button, Modal, TextInput
 from dotenv import load_dotenv
 
 # Google Sheets libraries
@@ -30,103 +29,100 @@ gc = gspread.authorize(creds)
 
 # Attempt to open the spreadsheet and select the "log" sheet
 sh = gc.open("snapshot_bot_log")
-worksheet = sh.worksheet("log")
+worksheet = sh.worksheet("log")  # For snapshot logs
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------------------
-# モーダル (ウォレットアドレス入力フォーム)
-# ------------------------------
-class RegisterWalletModal(Modal, title="Register Wallet"):
-    wallet = TextInput(
-        label="Your wallet address",
-        placeholder="Enter your wallet address here...",
-        required=True,
-        max_length=100
-    )
+# -------- モーダル (ウォレット入力) -------- #
+class RegisterWalletModal(discord.ui.Modal):
+    """
+    This modal pops up when a user clicks the "Register your wallet" button.
+    The user can type their wallet address. On submit, we check if it's
+    already registered in 'wallet_log' or register a new one.
+    """
+    def __init__(self, spreadsheet):
+        super().__init__(title="Register your wallet")
 
-    def __init__(self, sh_reference, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # GoogleSheetsへの参照を受け取って使い回す
-        self.sh = sh_reference
+        # We'll store the spreadsheet reference to log data
+        self.spreadsheet = spreadsheet
+
+        # Text input field (required)
+        self.wallet_input = discord.ui.TextInput(
+            label="Wallet Address",
+            placeholder="Enter your wallet address here",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.wallet_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        """ユーザーが[Submit]を押した時の処理"""
+        # Retrieve user info
         user_name = str(interaction.user)
         user_id = str(interaction.user.id)
-        wallet_address = self.wallet.value.strip()
+        wallet_address = self.wallet_input.value.strip()
 
+        # Try to get 'wallet_log' sheet
         try:
-            # "wallet_log" シートが存在するか確認
-            try:
-                register_worksheet = self.sh.worksheet("wallet_log")
-            except gspread.WorksheetNotFound:
-                # なければメッセージを返して終了
-                await interaction.response.send_message(
-                    content="The sheet 'wallet_log' was not found. Please create it first.",
-                    ephemeral=True
-                )
-                return
-
-            # シートから全データを取得し、既に同じuser_idがあるか確認
-            all_values = register_worksheet.get_all_values()
-            existing_row = None
-            for row in all_values:
-                # row = [DiscordName, DiscordID, WalletAddress]
-                if len(row) >= 2 and row[1] == user_id:
-                    existing_row = row
-                    break
-
-            if existing_row:
-                # 登録済み
-                already_wallet = existing_row[2] if len(existing_row) > 2 else "N/A"
-                await interaction.response.send_message(
-                    content=(
-                        f"You are already registered.\n"
-                        f"**Name**: {existing_row[0]}\n"
-                        f"**Wallet**: {already_wallet}"
-                    ),
-                    ephemeral=True
-                )
-            else:
-                # 未登録 -> 新規登録
-                register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
-                await interaction.response.send_message(
-                    content=(
-                        f"Your wallet has been registered.\n"
-                        f"**Name**: {user_name}\n"
-                        f"**Wallet**: {wallet_address}"
-                    ),
-                    ephemeral=True
-                )
-
-        except Exception as e:
-            # 何らかのエラーがあれば安全に終了し、エラーメッセージを表示
-            print(e)  # デバッグ用にログ
+            register_worksheet = self.spreadsheet.worksheet("wallet_log")
+        except gspread.WorksheetNotFound:
             await interaction.response.send_message(
-                content="An unexpected error occurred while accessing Google Sheets. Please try again later.",
+                content="The sheet 'wallet_log' was not found. Please create it first.",
+                ephemeral=True
+            )
+            return
+
+        # Check duplication
+        all_values = register_worksheet.get_all_values()
+        existing_row = None
+        for row in all_values:
+            # row = [DiscordName, DiscordID, WalletAddress]
+            if len(row) >= 2 and row[1] == user_id:
+                existing_row = row
+                break
+
+        if existing_row:
+            # Already registered
+            already_wallet = existing_row[2] if len(existing_row) > 2 else "N/A"
+            await interaction.response.send_message(
+                content=(
+                    f"You are already registered.\n"
+                    f"**Name**: {existing_row[0]}\n"
+                    f"**Wallet**: {already_wallet}"
+                ),
+                ephemeral=True
+            )
+        else:
+            # Not yet registered -> append a new row
+            register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
+            await interaction.response.send_message(
+                content=(
+                    f"Your wallet has been registered.\n"
+                    f"**Name**: {user_name}\n"
+                    f"**Wallet**: {wallet_address}"
+                ),
                 ephemeral=True
             )
 
-# ------------------------------
-# ビュー (ボタン配置)
-# ------------------------------
-class RegisterWalletView(View):
-    """ユーザーが押せるボタンを含むビュー"""
-    def __init__(self, sh_reference, timeout=180):
-        super().__init__(timeout=timeout)
-        self.sh = sh_reference  # スプレッドシートへの参照を保持
+# -------- ボタン付きのView -------- #
+class RegisterWalletView(discord.ui.View):
+    """
+    This View contains a button that opens the RegisterWalletModal.
+    By default, the View doesn't timeout (timeout=None) so it stays active.
+    """
+    def __init__(self, spreadsheet):
+        super().__init__(timeout=None)
+        self.spreadsheet = spreadsheet
 
-    @discord.ui.button(label="Register Wallet", style=discord.ButtonStyle.primary)
-    async def register_wallet_button(self, interaction: discord.Interaction, button: Button):
-        """「Register Wallet」ボタンを押した時にモーダルを表示"""
-        modal = RegisterWalletModal(sh_reference=self.sh)
+    @discord.ui.button(label="Register your wallet", style=discord.ButtonStyle.primary)
+    async def register_wallet_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        When the user clicks this button, we show the modal (RegisterWalletModal).
+        """
+        modal = RegisterWalletModal(self.spreadsheet)
         await interaction.response.send_modal(modal)
 
-# ------------------------------
-# コグ
-# ------------------------------
+# -------- Cog -------- #
 class SnapshotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -157,7 +153,7 @@ class SnapshotCog(commands.Cog):
         offset = 100
         page = 1
 
-        # 1) Collect all holder info (including duplicates) in a list
+        # 1) Collect all holder info in a list
         all_holders = []
 
         # Stop if too many consecutive errors occur
@@ -168,7 +164,7 @@ class SnapshotCog(commands.Cog):
         max_holders = 1000
 
         while True:
-            # Update progress message
+            # Update progress
             await progress_message.edit(content=f"Now reading page {page}...")
 
             params = {
@@ -181,26 +177,23 @@ class SnapshotCog(commands.Cog):
             }
             response = requests.get(base_url, params=params)
 
-            # If an error occurs, don't stop immediately
+            # Handle errors with retry
             if response.status_code != 200:
                 error_count += 1
                 if error_count >= max_consecutive_errors:
                     break
                 time.sleep(0.5)
-                continue  # retry the same page
+                continue
 
             data = response.json()
-
-            # If API status is not "1" or no results returned
             if data.get("status") != "1":
                 error_count += 1
                 if error_count >= max_consecutive_errors:
                     break
                 time.sleep(0.5)
-                continue  # retry the same page
+                continue
             else:
-                # Reset error counter on success
-                error_count = 0
+                error_count = 0  # reset on success
 
             result_list = data.get("result")
             if not result_list:
@@ -211,36 +204,30 @@ class SnapshotCog(commands.Cog):
                 address = holder["TokenHolderAddress"]
                 quantity_float = float(holder["TokenHolderQuantity"])
                 all_holders.append((address, quantity_float))
-
-                # Stop at 1000
                 if len(all_holders) >= max_holders:
                     break
 
             if len(all_holders) >= max_holders:
                 break
 
-            # If fewer results than offset, we've reached the final page
             if len(result_list) < offset:
                 break
 
             page += 1
             time.sleep(0.5)
 
-        # 2) Calculate total supply as an integer
+        # 2) Calculate total supply (int)
         total_supply = int(sum(quantity for _, quantity in all_holders))
-
-        # 3) Total number of holders (including duplicates)
+        # 3) total number of holders
         total_holders = len(all_holders)
 
         # 4) Create CSV
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
-
         for address, quantity_float in all_holders:
-            quantity_str = str(int(quantity_float))  # truncate decimals
+            quantity_str = str(int(quantity_float))
             writer.writerow([address, quantity_str])
-
         csv_buffer.seek(0)
 
         # 5) Summary text
@@ -269,20 +256,23 @@ class SnapshotCog(commands.Cog):
         )
 
     @app_commands.command(
-        name="registerwallet",
-        description="(Admin only) Create a wallet-registration button for users."
+        name="register_wallet",
+        description="Admin only: create a button for users to register their wallet."
     )
-    @app_commands.checks.has_permissions(administrator=True)
-    async def registerwallet(self, interaction: discord.Interaction):
+    @app_commands.checks.has_permissions(administrator=True)  # 管理者限定
+    async def register_wallet(self, interaction: discord.Interaction):
         """
-        Admin-only command: posts a public message with a button to open a wallet registration modal.
+        Admin command:
+        Posts a button that any user can click to register their wallet (ephemeral).
         """
-        # ここではエフェメラル = False で投稿し、全員がボタンを押せるようにする
-        view = RegisterWalletView(sh_reference=sh)
+        view = RegisterWalletView(sh)  # Viewにスプレッドシートの参照を渡す
+        # このメッセージは皆が見えるように ephemeral=False で送る
+        # ただし「すべての返答をエフェメラルで」という要望があれば
+        # Adminだけが見える形になってしまうので注意。
         await interaction.response.send_message(
-            content="Click the button below to register your wallet.",
+            content="Click the button below to register your wallet (ephemeral).",
             view=view,
-            ephemeral=False
+            ephemeral=False  # ここをTrueにすると、Adminしかボタンを見れなくなる
         )
 
 async def setup_bot():
