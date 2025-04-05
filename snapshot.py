@@ -8,6 +8,7 @@ import time
 
 from discord import app_commands
 from discord.ext import commands
+from discord.ui import View, Button, Modal, TextInput
 from dotenv import load_dotenv
 
 # Google Sheets libraries
@@ -34,6 +35,98 @@ worksheet = sh.worksheet("log")
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ------------------------------
+# モーダル (ウォレットアドレス入力フォーム)
+# ------------------------------
+class RegisterWalletModal(Modal, title="Register Wallet"):
+    wallet = TextInput(
+        label="Your wallet address",
+        placeholder="Enter your wallet address here...",
+        required=True,
+        max_length=100
+    )
+
+    def __init__(self, sh_reference, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # GoogleSheetsへの参照を受け取って使い回す
+        self.sh = sh_reference
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """ユーザーが[Submit]を押した時の処理"""
+        user_name = str(interaction.user)
+        user_id = str(interaction.user.id)
+        wallet_address = self.wallet.value.strip()
+
+        try:
+            # "wallet_log" シートが存在するか確認
+            try:
+                register_worksheet = self.sh.worksheet("wallet_log")
+            except gspread.WorksheetNotFound:
+                # なければメッセージを返して終了
+                await interaction.response.send_message(
+                    content="The sheet 'wallet_log' was not found. Please create it first.",
+                    ephemeral=True
+                )
+                return
+
+            # シートから全データを取得し、既に同じuser_idがあるか確認
+            all_values = register_worksheet.get_all_values()
+            existing_row = None
+            for row in all_values:
+                # row = [DiscordName, DiscordID, WalletAddress]
+                if len(row) >= 2 and row[1] == user_id:
+                    existing_row = row
+                    break
+
+            if existing_row:
+                # 登録済み
+                already_wallet = existing_row[2] if len(existing_row) > 2 else "N/A"
+                await interaction.response.send_message(
+                    content=(
+                        f"You are already registered.\n"
+                        f"**Name**: {existing_row[0]}\n"
+                        f"**Wallet**: {already_wallet}"
+                    ),
+                    ephemeral=True
+                )
+            else:
+                # 未登録 -> 新規登録
+                register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
+                await interaction.response.send_message(
+                    content=(
+                        f"Your wallet has been registered.\n"
+                        f"**Name**: {user_name}\n"
+                        f"**Wallet**: {wallet_address}"
+                    ),
+                    ephemeral=True
+                )
+
+        except Exception as e:
+            # 何らかのエラーがあれば安全に終了し、エラーメッセージを表示
+            print(e)  # デバッグ用にログ
+            await interaction.response.send_message(
+                content="An unexpected error occurred while accessing Google Sheets. Please try again later.",
+                ephemeral=True
+            )
+
+# ------------------------------
+# ビュー (ボタン配置)
+# ------------------------------
+class RegisterWalletView(View):
+    """ユーザーが押せるボタンを含むビュー"""
+    def __init__(self, sh_reference, timeout=180):
+        super().__init__(timeout=timeout)
+        self.sh = sh_reference  # スプレッドシートへの参照を保持
+
+    @discord.ui.button(label="Register Wallet", style=discord.ButtonStyle.primary)
+    async def register_wallet_button(self, interaction: discord.Interaction, button: Button):
+        """「Register Wallet」ボタンを押した時にモーダルを表示"""
+        modal = RegisterWalletModal(sh_reference=self.sh)
+        await interaction.response.send_modal(modal)
+
+# ------------------------------
+# コグ
+# ------------------------------
 class SnapshotCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -176,43 +269,20 @@ class SnapshotCog(commands.Cog):
         )
 
     @app_commands.command(
-        name="register",
-        description="Register your wallet address."
+        name="registerwallet",
+        description="(Admin only) Create a wallet-registration button for users."
     )
-    @app_commands.describe(wallet="Enter your wallet address")
-    async def register(self, interaction: discord.Interaction, wallet: str):
+    @app_commands.checks.has_permissions(administrator=True)
+    async def registerwallet(self, interaction: discord.Interaction):
         """
-        Register your wallet address. This command is ephemeral
-        and will log your Discord name, ID, and wallet address
-        to the 'wallet_log' sheet.
+        Admin-only command: posts a public message with a button to open a wallet registration modal.
         """
-        # Ephemeral response
-        await interaction.response.defer(ephemeral=True)
-
-        # Discord user info
-        user_name = str(interaction.user)
-        user_id = str(interaction.user.id)
-        wallet_address = wallet.strip()
-
-        # Log to "wallet_log" sheet
-        try:
-            register_worksheet = sh.worksheet("wallet_log")
-        except gspread.WorksheetNotFound:
-            # If you want to create it automatically, uncomment below:
-            # register_worksheet = sh.add_worksheet(title="wallet_log", rows="100", cols="3")
-            await interaction.followup.send(
-                content="The sheet 'wallet_log' was not found. Please create it first.",
-                ephemeral=True
-            )
-            return
-
-        # Append row: [DiscordName, DiscordID, WalletAddress]
-        register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
-
-        # Send ephemeral success message in English
-        await interaction.followup.send(
-            content=f"Your wallet has been registered.\n**Name**: {user_name}\n**Wallet**: {wallet_address}",
-            ephemeral=True
+        # ここではエフェメラル = False で投稿し、全員がボタンを押せるようにする
+        view = RegisterWalletView(sh_reference=sh)
+        await interaction.response.send_message(
+            content="Click the button below to register your wallet.",
+            view=view,
+            ephemeral=False
         )
 
 async def setup_bot():
