@@ -301,3 +301,189 @@ async def on_ready():
     await setup_bot()
 
 bot.run(DISCORD_TOKEN)
+import time
+import gspread
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+# ------------ ヘルパー関数：ワークシート存在チェック or 作成 -------------
+def get_or_create_worksheet(spreadsheet, sheet_name: str):
+    """
+    指定タイトルのワークシートが存在しない場合は新規作成し、存在すればそのまま返す。
+    """
+    try:
+        ws = spreadsheet.worksheet(sheet_name)
+        return ws
+    except gspread.WorksheetNotFound:
+        return spreadsheet.add_worksheet(title=sheet_name, rows=100, cols=20)
+
+# ------------ CollabMonで使用する「ウォレット一覧を扱う」クラス -------------
+class CollabMonWalletsView(discord.ui.View):
+    """
+    「Let's go!」ボタンを押したあとに表示するウォレット一覧＆追加ボタン用View。
+    - 今回は「collabmon_wallet_log」シートからユーザーのウォレットを取得。
+    - 外部サイトで登録する想定で、追加用モーダルは設けず、Linkボタンだけ。
+    """
+    def __init__(self, spreadsheet, user: discord.User):
+        super().__init__(timeout=None)
+        self.spreadsheet = spreadsheet
+        self.user = user
+
+        # コラボ用ウォレットログシートの参照を確保
+        self.wallet_sheet = get_or_create_worksheet(self.spreadsheet, "collabmon_wallet_log")
+
+        # ここでユーザーが既に登録済みかどうかをシートから確認
+        # [UserID, WalletAddress, Timestamp] などの想定で格納するとする
+        all_values = self.wallet_sheet.get_all_values()
+        matched = [row for row in all_values if len(row) >= 2 and row[0] == str(user.id)]
+        self.user_wallets = []
+        for row in matched:
+            # row = [UserID, WalletAddress, Timestamp]
+            wallet_addr = row[1] if len(row) > 1 else None
+            if wallet_addr:
+                self.user_wallets.append(wallet_addr)
+
+    @discord.ui.button(label="Use connected wallets", style=discord.ButtonStyle.primary)
+    async def use_connected_wallets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        既存ウォレットでNFT認証する想定。
+        ここではテスト用のメッセージだけを返信。
+        """
+        if not self.user_wallets:
+            await interaction.response.send_message(
+                content="No connected wallets found. Please add a new wallet.",
+                ephemeral=True
+            )
+            return
+
+        # テスト用：ウォレットを表示して認証完了とする
+        wallet_list_text = "\n".join(self.user_wallets)
+        await interaction.response.send_message(
+            content=f"Using your connected wallet(s):\n```\n{wallet_list_text}\n```\n(Here we would verify your NFT...)",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Add a new wallet", style=discord.ButtonStyle.link, url="https://example.com")
+    async def add_new_wallet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        外部サイトに遷移して、ウォレットを登録するイメージ。
+        - 実際の登録処理は外部サイトにて実装し、その結果シートへ書き込むなどを想定。
+        """
+        # Linkボタンのため、押した時点でDiscord側ではコールバックは呼ばれません。
+        pass
+
+# ------------ CollabMonで使用する「最初の2ボタン」クラス -------------
+class CollabMonView(discord.ui.View):
+    """
+    最初に表示する2つのボタン 「Let's go!」「docs」 用のView。
+    ボタンを押下したらエフェメラルメッセージを返し、ウォレット一覧や追加ボタンを表示。
+    """
+    def __init__(self, spreadsheet):
+        super().__init__(timeout=None)
+        self.spreadsheet = spreadsheet
+
+    @discord.ui.button(label="Let's go!", style=discord.ButtonStyle.primary)
+    async def lets_go(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        「Let's go!」押下 → エフェメラルメッセージでユーザーのウォレット一覧を表示。
+        さらに「Use connected wallets」「Add a new wallet」のボタンを提供。
+        """
+        user_wallets_view = CollabMonWalletsView(self.spreadsheet, interaction.user)
+
+        if user_wallets_view.user_wallets:
+            wallet_list_text = "\n".join(user_wallets_view.user_wallets)
+            text = (
+                "My Connected Wallets\n"
+                "Collab.Mon now supports wallet verification.\n\n"
+                f"evm:\n```\n{wallet_list_text}\n```"
+            )
+        else:
+            text = "You have no connected wallets.\nPlease add a new wallet."
+
+        await interaction.response.send_message(
+            content=text,
+            view=user_wallets_view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="docs", style=discord.ButtonStyle.secondary)
+    async def docs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        テスト用: docsボタンを押したときの動作。
+        実際は外部ドキュメントへのリンクなどを想定。ここではテスト用にメッセージ出力。
+        """
+        await interaction.response.send_message(
+            content="（docsボタン押下のテスト）後ほど実際の文書やリンクに差し替えてください。",
+            ephemeral=True
+        )
+
+# ------------ 新コグ: /setupverify コマンド -------------
+class SetupVerifyCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(
+        name="setupverify",
+        description="Admin only: sets up the Collab.Mon verification embed with two buttons."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        channel="Select the channel to post verification embed",
+        contract_address="Enter the contract address for verification"
+    )
+    async def setupverify(self, interaction: discord.Interaction, channel: discord.TextChannel, contract_address: str):
+        """
+        Adminコマンド:
+          - 指定チャンネルにCollab.MonのVerify Embed+ボタンを投稿
+          - contract_addressなどをserver_configに記録
+          - 応答はエフェメラル
+        """
+        # 1) server_config シートの確保 (なければ作成)
+        server_config_ws = get_or_create_worksheet(sh, "server_config")
+
+        # 2) スプレッドシートに記録: [GuildID, GuildName, ChannelID, ContractAddress, Timestamp]
+        guild_id = interaction.guild.id if interaction.guild else "N/A"
+        guild_name = interaction.guild.name if interaction.guild else "N/A"
+        channel_id = channel.id
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        row_data = [str(guild_id), guild_name, str(channel_id), contract_address, now_str]
+        server_config_ws.append_row(row_data, value_input_option="RAW")
+
+        # 3) Embedを作成し投稿
+        embed = discord.Embed(
+            title="Collab.Mon",
+            description=(
+                "Verify your assets\n"
+                "This is a read-only connection. Do not share your private keys. "
+                "We will never ask for your seed phrase. We will never DM you."
+            ),
+            color=0x836EF9  # #836EF9
+        )
+        view = CollabMonView(sh)  # 上記で定義したView（「Let's go!」「docs」2ボタン）
+
+        # 指定チャンネルに投稿
+        await channel.send(embed=embed, view=view)
+
+        # 管理者へのエフェメラル回答
+        await interaction.response.send_message(
+            content=(
+                f"Collab.Mon Verify embed has been posted to {channel.mention}.\n"
+                f"Contract: `{contract_address}` recorded."
+            ),
+            ephemeral=True
+        )
+
+# ------------ on_ready 2: 新コグ登録 -------------
+@bot.listen("on_ready")
+async def add_setupverify_cog():
+    """
+    botが準備完了した後、SetupVerifyCogを追加でロードし、コマンドを同期する。
+    既存コードは一切変更せず、リスナーを追加する形で対応。
+    """
+    # 既にロード済みであればスキップ
+    if bot.get_cog("SetupVerifyCog") is None:
+        await bot.add_cog(SetupVerifyCog(bot))
+        await bot.tree.sync()
+        print("SetupVerifyCog loaded and slash commands synced.")
+
