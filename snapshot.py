@@ -1,6 +1,3 @@
-##############################
-# 1) すべてのimportを先頭へ
-##############################
 import os
 import io
 import csv
@@ -327,9 +324,6 @@ from discord.ext import commands
 ##############################
 
 def get_or_create_worksheet(spreadsheet, sheet_name: str):
-    """
-    指定タイトルのワークシートが存在しない場合は新規作成し、存在すればそのまま返す。
-    """
     try:
         ws = spreadsheet.worksheet(sheet_name)
         return ws
@@ -337,24 +331,25 @@ def get_or_create_worksheet(spreadsheet, sheet_name: str):
         return spreadsheet.add_worksheet(title=sheet_name, rows=100, cols=20)
 
 class CollabMonWalletsView(discord.ui.View):
-    """
-    「Let's go!」ボタンを押したあとに表示するウォレット一覧＆追加ボタン用View。
-    """
     def __init__(self, spreadsheet, user: discord.User):
         super().__init__(timeout=None)
         self.spreadsheet = spreadsheet
         self.user = user
+
+        # collabmon_wallet_log シートの確保
         self.wallet_sheet = get_or_create_worksheet(self.spreadsheet, "collabmon_wallet_log")
 
-        # ユーザーが既に登録済みかどうかをシートから確認 (形式 [UserID, WalletAddress, Timestamp] を想定)
+        # ユーザーが既に登録済みか確認
         all_values = self.wallet_sheet.get_all_values()
         matched = [row for row in all_values if len(row) >= 2 and row[0] == str(user.id)]
         self.user_wallets = []
         for row in matched:
-            # row = [UserID, WalletAddress, Timestamp]
-            wallet_addr = row[1] if len(row) > 1 else None
-            if wallet_addr:
-                self.user_wallets.append(wallet_addr)
+            if len(row) > 1:
+                self.user_wallets.append(row[1])
+
+        # ここで「Add a new wallet」ボタンのURLを付与
+        # （下で定義しているメソッド名 add_new_wallet が実際のボタンオブジェクト）
+        self.add_new_wallet.url = "https://example.com"
 
     @discord.ui.button(label="Use connected wallets", style=discord.ButtonStyle.primary)
     async def use_connected_wallets(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -371,18 +366,14 @@ class CollabMonWalletsView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Add a new wallet", style=discord.ButtonStyle.link, url="https://example.com")
+    @discord.ui.button(label="Add a new wallet", style=discord.ButtonStyle.link)
     async def add_new_wallet(self, interaction: discord.Interaction, button: discord.ui.Button):
         """
-        外部サイトに遷移して、ウォレットを登録するイメージ。
+        Linkボタンなので基本的に押してもコールバックは呼ばれません。
         """
-        # Linkボタンなので押した時点でDiscord側コールバックは実行されません。
         pass
 
 class CollabMonView(discord.ui.View):
-    """
-    最初に表示する2つのボタン 「Let's go!」「docs」 用のView。
-    """
     def __init__(self, spreadsheet):
         super().__init__(timeout=None)
         self.spreadsheet = spreadsheet
@@ -428,12 +419,6 @@ class SetupVerifyCog(commands.Cog):
         contract_address="Enter the contract address for verification"
     )
     async def setupverify(self, interaction: discord.Interaction, channel: discord.TextChannel, contract_address: str):
-        """
-        Adminコマンド:
-          - 指定チャンネルにCollab.MonのVerify Embed+ボタンを投稿
-          - contract_addressなどをserver_configに記録
-          - 応答はエフェメラル
-        """
         server_config_ws = get_or_create_worksheet(sh, "server_config")
 
         guild_id = interaction.guild.id if interaction.guild else "N/A"
@@ -466,16 +451,10 @@ class SetupVerifyCog(commands.Cog):
 
 @bot.listen("on_ready")
 async def add_setupverify_cog():
-    """
-    Botが起動完了した後、SetupVerifyCogを追加し、slashコマンドを同期
-    """
     if bot.get_cog("SetupVerifyCog") is None:
         await bot.add_cog(SetupVerifyCog(bot))
         await bot.tree.sync()
         print("SetupVerifyCog loaded and slash commands synced.")
 
-##############################
-# 4) ファイル末尾に bot.run
-##############################
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
