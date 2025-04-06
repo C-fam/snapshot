@@ -297,39 +297,33 @@ class CollabMonWalletsView(discord.ui.View):
             if len(row) > 1:
                 self.user_wallets.append(row[1])
 
-        # LinkボタンのURLを設定
-        self.add_new_wallet.url = "https://example.com"
+        # リンクボタンはコールバックと併用不可。
+        # → 直接 Button オブジェクトを生成し、urlを指定して add_item する
+        add_wallet_button = discord.ui.Button(
+            label="Add a new wallet",
+            style=discord.ButtonStyle.link,
+            url="https://example.com"
+        )
+        self.add_item(add_wallet_button)
 
     @discord.ui.button(label="Use connected wallets", style=discord.ButtonStyle.primary)
     async def use_connected_wallets(self, interaction: discord.Interaction, button: discord.ui.Button):
         print("[DEBUG] 'Use connected wallets' button clicked.")
-        try:
-            if not self.user_wallets:
-                await interaction.response.send_message(
-                    content="No connected wallets found. Please add a new wallet.",
-                    ephemeral=True
-                )
-                return
-
-            wallet_list_text = "\n".join(self.user_wallets)
+        if not self.user_wallets:
             await interaction.response.send_message(
-                content=(
-                    f"Using your connected wallet(s):\n```\n{wallet_list_text}\n```\n"
-                    "(Here we would verify your NFT...)"
-                ),
+                content="No connected wallets found. Please add a new wallet.",
                 ephemeral=True
             )
-        except Exception as e:
-            print("Error in use_connected_wallets:", e)
-            await interaction.response.send_message(
-                content=f"Error in use_connected_wallets: {e}",
-                ephemeral=True
-            )
+            return
 
-    @discord.ui.button(label="Add a new wallet", style=discord.ButtonStyle.link)
-    async def add_new_wallet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Linkボタンなのでコールバックは呼ばれないが、念のためデバッグ用
-        print("[DEBUG] 'Add a new wallet' button clicked (though Link won't truly callback).")
+        wallet_list_text = "\n".join(self.user_wallets)
+        await interaction.response.send_message(
+            content=(
+                f"Using your connected wallet(s):\n```\n{wallet_list_text}\n```\n"
+                "(Here we would verify your NFT...)"
+            ),
+            ephemeral=True
+        )
 
 class CollabMonView(discord.ui.View):
     def __init__(self, spreadsheet):
@@ -339,30 +333,23 @@ class CollabMonView(discord.ui.View):
     @discord.ui.button(label="Let's go!", style=discord.ButtonStyle.primary)
     async def lets_go(self, interaction: discord.Interaction, button: discord.ui.Button):
         print("[DEBUG] 'Let's go!' button clicked.")
-        try:
-            user_wallets_view = CollabMonWalletsView(self.spreadsheet, interaction.user)
+        user_wallets_view = CollabMonWalletsView(self.spreadsheet, interaction.user)
 
-            if user_wallets_view.user_wallets:
-                wallet_list_text = "\n".join(user_wallets_view.user_wallets)
-                text = (
-                    "My Connected Wallets\n"
-                    "Collab.Mon now supports wallet verification.\n\n"
-                    f"evm:\n```\n{wallet_list_text}\n```"
-                )
-            else:
-                text = "You have no connected wallets.\nPlease add a new wallet."
+        if user_wallets_view.user_wallets:
+            wallet_list_text = "\n".join(user_wallets_view.user_wallets)
+            text = (
+                "My Connected Wallets\n"
+                "Collab.Mon now supports wallet verification.\n\n"
+                f"evm:\n```\n{wallet_list_text}\n```"
+            )
+        else:
+            text = "You have no connected wallets.\nPlease add a new wallet."
 
-            await interaction.response.send_message(
-                content=text,
-                view=user_wallets_view,
-                ephemeral=True
-            )
-        except Exception as e:
-            print("Error in lets_go:", e)
-            await interaction.response.send_message(
-                content=f"Error in lets_go: {e}",
-                ephemeral=True
-            )
+        await interaction.response.send_message(
+            content=text,
+            view=user_wallets_view,
+            ephemeral=True
+        )
 
     @discord.ui.button(label="docs", style=discord.ButtonStyle.secondary)
     async def docs(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -387,53 +374,43 @@ class SetupVerifyCog(commands.Cog):
     )
     async def setupverify(self, interaction: discord.Interaction, channel: discord.TextChannel, contract_address: str):
         print("[DEBUG] /setupverify invoked.")
-        try:
-            server_config_ws = get_or_create_worksheet(sh, "server_config")
+        server_config_ws = get_or_create_worksheet(sh, "server_config")
 
-            guild_id = interaction.guild.id if interaction.guild else "N/A"
-            guild_name = interaction.guild.name if interaction.guild else "N/A"
-            channel_id = channel.id
-            now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            row_data = [str(guild_id), guild_name, str(channel_id), contract_address, now_str]
-            server_config_ws.append_row(row_data, value_input_option="RAW")
+        guild_id = interaction.guild.id if interaction.guild else "N/A"
+        guild_name = interaction.guild.name if interaction.guild else "N/A"
+        channel_id = channel.id
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        row_data = [str(guild_id), guild_name, str(channel_id), contract_address, now_str]
+        server_config_ws.append_row(row_data, value_input_option="RAW")
 
-            embed = discord.Embed(
-                title="Collab.Mon",
-                description=(
-                    "Verify your assets\n"
-                    "This is a read-only connection. Do not share your private keys. "
-                    "We will never ask for your seed phrase. We will never DM you."
-                ),
-                color=0x836EF9
-            )
-            view = CollabMonView(sh)
+        embed = discord.Embed(
+            title="Collab.Mon",
+            description=(
+                "Verify your assets\n"
+                "This is a read-only connection. Do not share your private keys. "
+                "We will never ask for your seed phrase. We will never DM you."
+            ),
+            color=0x836EF9
+        )
+        view = CollabMonView(sh)
 
-            await channel.send(embed=embed, view=view)
+        await channel.send(embed=embed, view=view)
 
-            await interaction.response.send_message(
-                content=(
-                    f"Collab.Mon Verify embed has been posted to {channel.mention}.\n"
-                    f"Contract: `{contract_address}` recorded."
-                ),
-                ephemeral=True
-            )
-        except Exception as e:
-            print("Error in /setupverify:", e)
-            await interaction.response.send_message(
-                content=f"Error in setupverify: {e}",
-                ephemeral=True
-            )
+        await interaction.response.send_message(
+            content=(
+                f"Collab.Mon Verify embed has been posted to {channel.mention}.\n"
+                f"Contract: `{contract_address}` recorded."
+            ),
+            ephemeral=True
+        )
 
 @bot.listen("on_ready")
 async def add_setupverify_cog():
     print("[DEBUG] on_ready -> add_setupverify_cog() triggered.")
-    try:
-        if bot.get_cog("SetupVerifyCog") is None:
-            await bot.add_cog(SetupVerifyCog(bot))
-            await bot.tree.sync()
-            print("SetupVerifyCog loaded and slash commands synced.")
-    except Exception as e:
-        print("Error adding SetupVerifyCog:", e)
+    if bot.get_cog("SetupVerifyCog") is None:
+        await bot.add_cog(SetupVerifyCog(bot))
+        await bot.tree.sync()
+        print("SetupVerifyCog loaded and slash commands synced.")
 
 ##############################
 # ファイル末尾の起動
