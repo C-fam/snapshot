@@ -1,6 +1,3 @@
-##############################
-# 1) importを先頭に集約
-##############################
 import os
 import io
 import csv
@@ -17,11 +14,6 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-
-##############################
-# 2) 既存コード
-##############################
-
 # Load environment variables from .env
 load_dotenv()
 
@@ -35,6 +27,7 @@ creds_dict = json.loads(SERVICE_ACCOUNT_INFO)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
+# Attempt to open the spreadsheet and select the "log" sheet
 sh = gc.open("snapshot_bot_log")
 worksheet = sh.worksheet("log")  # For snapshot logs
 
@@ -50,8 +43,11 @@ class RegisterWalletModal(discord.ui.Modal):
     """
     def __init__(self, spreadsheet):
         super().__init__(title="Register your wallet")
+
+        # We'll store the spreadsheet reference to log data
         self.spreadsheet = spreadsheet
 
+        # Text input field (required)
         self.wallet_input = discord.ui.TextInput(
             label="Wallet Address",
             placeholder="Enter your wallet address here",
@@ -61,10 +57,12 @@ class RegisterWalletModal(discord.ui.Modal):
         self.add_item(self.wallet_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Retrieve user info
         user_name = str(interaction.user)
         user_id = str(interaction.user.id)
         wallet_address = self.wallet_input.value.strip()
 
+        # Try to get 'wallet_log' sheet
         try:
             register_worksheet = self.spreadsheet.worksheet("wallet_log")
         except gspread.WorksheetNotFound:
@@ -74,6 +72,7 @@ class RegisterWalletModal(discord.ui.Modal):
             )
             return
 
+        # Check duplication (can handle ~1000 rows or more)
         all_values = register_worksheet.get_all_values()
         existing_row = None
         for row in all_values:
@@ -83,6 +82,7 @@ class RegisterWalletModal(discord.ui.Modal):
                 break
 
         if existing_row:
+            # Already registered
             already_wallet = existing_row[2] if len(existing_row) > 2 else "N/A"
             await interaction.response.send_message(
                 content=(
@@ -93,6 +93,7 @@ class RegisterWalletModal(discord.ui.Modal):
                 ephemeral=True
             )
         else:
+            # Not yet registered -> append a new row
             register_worksheet.append_row([user_name, user_id, wallet_address], value_input_option="RAW")
             await interaction.response.send_message(
                 content=(
@@ -107,6 +108,7 @@ class RegisterWalletModal(discord.ui.Modal):
 class RegisterWalletView(discord.ui.View):
     """
     This View contains a button that opens the RegisterWalletModal.
+    By default, the View doesn't timeout (timeout=None) so it stays active.
     """
     def __init__(self, spreadsheet):
         super().__init__(timeout=None)
@@ -114,6 +116,9 @@ class RegisterWalletView(discord.ui.View):
 
     @discord.ui.button(label="Register your wallet", style=discord.ButtonStyle.primary)
     async def register_wallet_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        When the user clicks this button, we show the modal (RegisterWalletModal).
+        """
         modal = RegisterWalletModal(self.spreadsheet)
         await interaction.response.send_modal(modal)
 
@@ -128,7 +133,15 @@ class SnapshotCog(commands.Cog):
     )
     @app_commands.describe(contract_address="Enter the token contract address")
     async def snapshot(self, interaction: discord.Interaction, contract_address: str):
+        """
+        Retrieve up to 1000 NFT holders.
+        This may take a while if there are many holders.
+        (API is called at 0.5-second intervals)
+        """
+        # Defer the response so it remains ephemeral until final output
         await interaction.response.defer(ephemeral=True)
+
+        # Initial progress message
         progress_message = await interaction.followup.send(
             content="Fetching token holders... (page 1)",
             ephemeral=True
@@ -140,13 +153,20 @@ class SnapshotCog(commands.Cog):
         offset = 100
         page = 1
 
+        # 1) Collect all holder info
         all_holders = []
+
+        # Stop if too many consecutive errors occur
         max_consecutive_errors = 5
         error_count = 0
+
+        # Limit to 1000 holders
         max_holders = 1000
 
         while True:
+            # Update progress
             await progress_message.edit(content=f"Now reading page {page}...")
+
             params = {
                 "module": module,
                 "action": action,
@@ -157,6 +177,7 @@ class SnapshotCog(commands.Cog):
             }
             response = requests.get(base_url, params=params)
 
+            # Handle errors with retry
             if response.status_code != 200:
                 error_count += 1
                 if error_count >= max_consecutive_errors:
@@ -195,9 +216,12 @@ class SnapshotCog(commands.Cog):
             page += 1
             time.sleep(0.5)
 
+        # 2) Calculate total supply (int)
         total_supply = int(sum(quantity for _, quantity in all_holders))
+        # 3) total number of holders
         total_holders = len(all_holders)
 
+        # 4) Create CSV
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["TokenHolderAddress", "TokenHolderQuantity"])
@@ -206,6 +230,7 @@ class SnapshotCog(commands.Cog):
             writer.writerow([address, quantity_str])
         csv_buffer.seek(0)
 
+        # 5) Summary text
         summary_text = (
             f"**Contract Address**: {contract_address}\n"
             f"**Total Holders**: {total_holders} (up to {max_holders})\n"
@@ -214,12 +239,14 @@ class SnapshotCog(commands.Cog):
             "Note: Only up to 1000 holders are supported."
         )
 
+        # 6) Log to Google Sheets
         user_name = str(interaction.user)
         worksheet.append_row(
             [user_name, contract_address, str(total_holders), str(total_supply)],
             value_input_option="RAW"
         )
 
+        # 7) Reply with CSV file
         file_to_send = discord.File(fp=csv_buffer, filename="holderList.csv")
         await progress_message.edit(content="Snapshot completed! Sending file...")
         await interaction.followup.send(
@@ -233,17 +260,30 @@ class SnapshotCog(commands.Cog):
         description="Admin only: create an embed+button for users to register their wallet."
     )
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(channel="Select the channel to post the embed and button")
+    @app_commands.describe(
+        channel="Select the channel to post the embed and button"
+    )
     async def register_wallet(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """
+        Admin command:
+        Posts an embed (color #836EF9) and a button in the specified channel.
+        """
+        # Defer the response in ephemeral mode, so the command usage isn't visible
         await interaction.response.defer(ephemeral=True)
+
+        # Embed の作成 (バーの色 #836EF9)
         embed = discord.Embed(
             title="Register your wallet",
             description="Click the button below to register your wallet.",
             color=0x836EF9
         )
 
-        view = RegisterWalletView(sh)
+        view = RegisterWalletView(sh)  # Viewにスプレッドシートの参照を渡す
+
+        # チャンネルにメッセージを投稿 (全体に見える)
         await channel.send(embed=embed, view=view)
+
+        # コマンド実行者にはエフェメラルで送信 (「投稿完了」など)
         await interaction.followup.send(
             content=f"Embed with a wallet registration button has been posted in {channel.mention}.",
             ephemeral=True
@@ -260,160 +300,4 @@ async def on_ready():
     await bot.wait_until_ready()
     await setup_bot()
 
-"""
 bot.run(DISCORD_TOKEN)
-import time
-import gspread
-import discord
-from discord import app_commands
-from discord.ext import commands
-"""
-
-##############################
-# 3) Collab.Mon追加パート
-##############################
-
-def get_or_create_worksheet(spreadsheet, sheet_name: str):
-    try:
-        ws = spreadsheet.worksheet(sheet_name)
-        return ws
-    except gspread.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=sheet_name, rows=100, cols=20)
-
-class CollabMonWalletsView(discord.ui.View):
-    def __init__(self, spreadsheet, user: discord.User):
-        super().__init__(timeout=None)
-        self.spreadsheet = spreadsheet
-        self.user = user
-
-        # collabmon_wallet_log シートを確保
-        self.wallet_sheet = get_or_create_worksheet(self.spreadsheet, "collabmon_wallet_log")
-
-        # 該当ユーザーのウォレット一覧を取得 ([UserID, WalletAddress, Timestamp]想定)
-        all_values = self.wallet_sheet.get_all_values()
-        matched = [row for row in all_values if len(row) >= 2 and row[0] == str(user.id)]
-        self.user_wallets = []
-        for row in matched:
-            if len(row) > 1:
-                self.user_wallets.append(row[1])
-
-        # リンクボタンはコールバックと併用不可。
-        # → 直接 Button オブジェクトを生成し、urlを指定して add_item する
-        add_wallet_button = discord.ui.Button(
-            label="Add a new wallet",
-            style=discord.ButtonStyle.link,
-            url="https://example.com"
-        )
-        self.add_item(add_wallet_button)
-
-    @discord.ui.button(label="Use connected wallets", style=discord.ButtonStyle.primary)
-    async def use_connected_wallets(self, interaction: discord.Interaction, button: discord.ui.Button):
-        print("[DEBUG] 'Use connected wallets' button clicked.")
-        if not self.user_wallets:
-            await interaction.response.send_message(
-                content="No connected wallets found. Please add a new wallet.",
-                ephemeral=True
-            )
-            return
-
-        wallet_list_text = "\n".join(self.user_wallets)
-        await interaction.response.send_message(
-            content=(
-                f"Using your connected wallet(s):\n```\n{wallet_list_text}\n```\n"
-                "(Here we would verify your NFT...)"
-            ),
-            ephemeral=True
-        )
-
-class CollabMonView(discord.ui.View):
-    def __init__(self, spreadsheet):
-        super().__init__(timeout=None)
-        self.spreadsheet = spreadsheet
-
-    @discord.ui.button(label="Let's go!", style=discord.ButtonStyle.primary)
-    async def lets_go(self, interaction: discord.Interaction, button: discord.ui.Button):
-        print("[DEBUG] 'Let's go!' button clicked.")
-        user_wallets_view = CollabMonWalletsView(self.spreadsheet, interaction.user)
-
-        if user_wallets_view.user_wallets:
-            wallet_list_text = "\n".join(user_wallets_view.user_wallets)
-            text = (
-                "My Connected Wallets\n"
-                "Collab.Mon now supports wallet verification.\n\n"
-                f"evm:\n```\n{wallet_list_text}\n```"
-            )
-        else:
-            text = "You have no connected wallets.\nPlease add a new wallet."
-
-        await interaction.response.send_message(
-            content=text,
-            view=user_wallets_view,
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="docs", style=discord.ButtonStyle.secondary)
-    async def docs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        print("[DEBUG] 'docs' button clicked.")
-        await interaction.response.send_message(
-            content="（docsボタン押下のテスト）後ほど実際の文書やリンクに差し替えてください。",
-            ephemeral=True
-        )
-
-class SetupVerifyCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @app_commands.command(
-        name="setupverify",
-        description="Admin only: sets up the Collab.Mon verification embed with two buttons."
-    )
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        channel="Select the channel to post verification embed",
-        contract_address="Enter the contract address for verification"
-    )
-    async def setupverify(self, interaction: discord.Interaction, channel: discord.TextChannel, contract_address: str):
-        print("[DEBUG] /setupverify invoked.")
-        server_config_ws = get_or_create_worksheet(sh, "server_config")
-
-        guild_id = interaction.guild.id if interaction.guild else "N/A"
-        guild_name = interaction.guild.name if interaction.guild else "N/A"
-        channel_id = channel.id
-        now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        row_data = [str(guild_id), guild_name, str(channel_id), contract_address, now_str]
-        server_config_ws.append_row(row_data, value_input_option="RAW")
-
-        embed = discord.Embed(
-            title="Collab.Mon",
-            description=(
-                "Verify your assets\n"
-                "This is a read-only connection. Do not share your private keys. "
-                "We will never ask for your seed phrase. We will never DM you."
-            ),
-            color=0x836EF9
-        )
-        view = CollabMonView(sh)
-
-        await channel.send(embed=embed, view=view)
-
-        await interaction.response.send_message(
-            content=(
-                f"Collab.Mon Verify embed has been posted to {channel.mention}.\n"
-                f"Contract: `{contract_address}` recorded."
-            ),
-            ephemeral=True
-        )
-
-@bot.listen("on_ready")
-async def add_setupverify_cog():
-    print("[DEBUG] on_ready -> add_setupverify_cog() triggered.")
-    if bot.get_cog("SetupVerifyCog") is None:
-        await bot.add_cog(SetupVerifyCog(bot))
-        await bot.tree.sync()
-        print("SetupVerifyCog loaded and slash commands synced.")
-
-##############################
-# ファイル末尾の起動
-##############################
-if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
