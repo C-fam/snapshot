@@ -102,6 +102,10 @@ def _get_ws(spreadsheet: gspread.Spreadsheet, title: str, create: bool = False) 
     return ws
 
 def _get_all_values(ws: gspread.Worksheet):
+    # bindings は“外部で手動更新”が起きるため必ず最新を取得（キャッシュしない）
+    if ws.title == "bindings":
+        return sheets_call(ws.get_all_values)
+
     key = (ws.title, "all")
     if key in _values_cache:
         return _values_cache[key]
@@ -170,16 +174,23 @@ def _get_bindings_ws() -> gspread.Worksheet:
 
 def _is_sheet_already_bound(guild_id: int, sheet_name: str) -> bool:
     ws = _get_bindings_ws()
-    for row in _get_all_values(ws)[1:]:
+    # ここはキャッシュを使わず常に最新を確認
+    for row in sheets_call(ws.get_all_values)[1:]:
         if len(row) >= 4 and row[0] == str(guild_id) and row[3] == sheet_name:
             return True
     return False
 
 def _get_binding_record(guild_id: int, sheet_name: str):
     ws = _get_bindings_ws()
-    for row in _get_all_values(ws)[1:]:
+    for row in sheets_call(ws.get_all_values)[1:]:
         if len(row) >= 4 and row[0] == str(guild_id) and row[3] == sheet_name:
-            return {"guild_id": int(row[0]), "channel_id": int(row[1]), "message_id": int(row[2]), "sheet_name": row[3], "created_at": row[4] if len(row) > 4 else ""}
+            return {
+                "guild_id": int(row[0]),
+                "channel_id": int(row[1]),
+                "message_id": int(row[2]),
+                "sheet_name": row[3],
+                "created_at": row[4] if len(row) > 4 else ""
+            }
     return None
 
 def _add_binding(guild_id: int, channel_id: int, message_id: int, sheet_name: str):
