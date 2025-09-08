@@ -114,6 +114,9 @@ def _get_all_values(ws: gspread.Worksheet):
     return vals
 
 def _find_row_by_id(ws: gspread.Worksheet, user_id: str):
+    # Force-refresh this sheet once right before reading (avoid showing stale values)
+    _values_cache.pop((ws.title, "all"), None)
+
     values = _get_all_values(ws)
     for idx, row in enumerate(values, start=1):
         if len(row) >= 2 and row[1] == user_id:
