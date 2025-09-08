@@ -32,6 +32,7 @@ sh = gc.open("snapshot_bot_log")
 worksheet = sh.worksheet("log")  # For snapshot logs
 
 intents = discord.Intents.default()
+intents.members = True  # ★追加：ロール抽出に必要（Developer Portal で Server Members Intent をONに）
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------- モーダル (ウォレット入力) -------- #
@@ -289,8 +290,196 @@ class SnapshotCog(commands.Cog):
             ephemeral=True
         )
 
+# =========================
+# ======== ここから追加（最適化版）========
+# =========================
+
+# 外部シート：wallet_log2 自動作成 & 並行アップサート
+TARGET_SHEET_KEY = "14YADpxT8db3YjSPkmDLW971UqlAb-LXBLQPJqCliXhQ"
+
+def _get_ws(spreadsheet, title, create=False):
+    try:
+        return spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        if create:
+            return spreadsheet.add_worksheet(title=title, rows=1000, cols=10)
+        raise
+
+def _upsert_by_discord_id(ws, user_name, user_id, wallet):
+    """列: [DiscordName, DiscordID, WalletAddress] / DiscordIDで一意"""
+    rows = ws.get_all_values()
+    for idx, row in enumerate(rows, start=1):
+        if len(row) >= 2 and row[1] == str(user_id):
+            ws.update_cell(idx, 1, user_name)
+            ws.update_cell(idx, 2, str(user_id))
+            ws.update_cell(idx, 3, wallet)
+            return "updated"
+    ws.append_row([user_name, str(user_id), wallet], value_input_option="RAW")
+    return "inserted"
+
+def upsert_wallet_everywhere(local_spreadsheet, user_name, user_id, wallet):
+    """ローカル wallet_log → upsert、外部 wallet_log / wallet_log2 → upsert（wallet_log2は自動生成）"""
+    # ローカル
+    ws_local = _get_ws(local_spreadsheet, "wallet_log", create=False)
+    _upsert_by_discord_id(ws_local, user_name, user_id, wallet)
+
+    # 外部
+    ext = gc.open_by_key(TARGET_SHEET_KEY)
+    ws1 = _get_ws(ext, "wallet_log", create=True)
+    ws2 = _get_ws(ext, "wallet_log2", create=True)
+    _upsert_by_discord_id(ws1, user_name, user_id, wallet)
+    _upsert_by_discord_id(ws2, user_name, user_id, wallet)
+
+def lookup_wallets(user_id):
+    """ローカル/外部の現状ウォレットを確認（見つかった最初の値を返す）"""
+    local = None
+    try:
+        ws_local = sh.worksheet("wallet_log")
+        for row in ws_local.get_all_values():
+            if len(row) >= 3 and row[1] == str(user_id):
+                local = row[2]
+                break
+    except gspread.WorksheetNotFound:
+        pass
+
+    external = None
+    try:
+        ext = gc.open_by_key(TARGET_SHEET_KEY)
+        for name in ["wallet_log", "wallet_log2"]:
+            try:
+                ws = ext.worksheet(name)
+                for r in ws.get_all_values():
+                    if len(r) >= 3 and r[1] == str(user_id):
+                        external = r[2]
+                        break
+                if external:
+                    break
+            except gspread.WorksheetNotFound:
+                continue
+    except Exception:
+        pass
+
+    return local, external
+
+# 1つの共通モーダル：登録/変更どちらにも利用（新ボタン専用。既存は触らない）
+class RegisterOrChangeWalletModal(discord.ui.Modal):
+    def __init__(self, spreadsheet, preset_wallet: str = ""):
+        super().__init__(title="Register / Change your wallet")
+        self.spreadsheet = spreadsheet
+        self.wallet_input = discord.ui.TextInput(
+            label="Wallet Address",
+            placeholder=preset_wallet if preset_wallet else "Enter your wallet address",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.wallet_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_name = str(interaction.user)
+        user_id = str(interaction.user.id)
+        wallet = self.wallet_input.value.strip()
+
+        try:
+            upsert_wallet_everywhere(self.spreadsheet, user_name, user_id, wallet)
+        except gspread.WorksheetNotFound:
+            await interaction.response.send_message(
+                content="Local 'wallet_log' not found. Please create it first.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            content=f"✅ Wallet saved: **{wallet}**\n(Synced to local wallet_log & external wallet_log / wallet_log2)",
+            ephemeral=True
+        )
+
+# 新しい2ボタン View（登録／確認変更）※既存のViewはそのまま
+class WalletActionsView(discord.ui.View):
+    def __init__(self, spreadsheet):
+        super().__init__(timeout=None)
+        self.spreadsheet = spreadsheet
+
+    @discord.ui.button(label="Register your wallet", style=discord.ButtonStyle.primary)
+    async def btn_register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 空のプレースホルダでモーダルを開く（新規登録想定）
+        await interaction.response.send_modal(RegisterOrChangeWalletModal(self.spreadsheet, preset_wallet=""))
+
+    @discord.ui.button(label="Check / Change wallet", style=discord.ButtonStyle.secondary)
+    async def btn_check_change(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 現在値を確認し、プレースホルダに入れてモーダルを表示（1回の応答枠をモーダルに使う）
+        uid = str(interaction.user.id)
+        local, external = lookup_wallets(uid)
+        preset = local or external or ""
+        await interaction.response.send_modal(RegisterOrChangeWalletModal(self.spreadsheet, preset_wallet=preset))
+
+# 追加のコマンド群（新設）
+class ExtraCommands(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(
+        name="post_wallet_buttons",
+        description="Admin only: post an embed with Register and Check/Change wallet buttons."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(channel="Select the channel to post the embed and buttons")
+    async def post_wallet_buttons(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        embed = discord.Embed(
+            title="Wallet actions",
+            description="Register, check, or change your wallet.",
+            color=0x836EF9
+        )
+        await channel.send(embed=embed, view=WalletActionsView(sh))
+        await interaction.followup.send(
+            content=f"✅ Posted wallet actions in {channel.mention}.",
+            ephemeral=True
+        )
+
+    @app_commands.command(
+        name="export_role_members",
+        description="Admin only: export username & uid of members having the specified role (CSV, ephemeral)."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(role="Select the role to export")
+    async def export_role_members(self, interaction: discord.Interaction, role: discord.Role):
+        """
+        取得方法を最適化：
+        - guild.chunk() でメンバーキャッシュを埋める（intents.members が必要）
+        - role.members を直接CSV化
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # メンバーキャッシュを埋める（必要に応じて分割ロード）
+            await interaction.guild.chunk()
+
+            members = list(role.members)
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["UserName", "DiscordID"])
+            for m in members:
+                writer.writerow([m.name, str(m.id)])
+            csv_buf.seek(0)
+
+            file = discord.File(fp=csv_buf, filename=f"{role.name}_members.csv")
+            await interaction.followup.send(
+                content=f"Role **{role.name}** members: {len(members)} users.",
+                ephemeral=True,
+                file=file
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                content="Missing permissions/intent. Enable **Server Members Intent** in Developer Portal and re-invite if needed.",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(content=f"Error: {e}", ephemeral=True)
+
+# 既存のsetupに新Cogを足すのみ（既存は変更なし）
 async def setup_bot():
     await bot.add_cog(SnapshotCog(bot))
+    await bot.add_cog(ExtraCommands(bot))  # ★追加
     await bot.tree.sync()
 
 @bot.event
