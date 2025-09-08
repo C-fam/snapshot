@@ -19,7 +19,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # ========= CONFIG =========
 # Check / Change ボタンでも、マスターにウォレットがあれば現在のシートへ登録するか？
-AUTO_ENROLL_FROM_MASTER_ON_ANY_BUTTON = False  # True にすると「どのボタンでも登録」可
+AUTO_ENROLL_FROM_MASTER_ON_ANY_BUTTON = True  # True にすると「どのボタンでも登録」可
 
 # Embed image
 EMBED_IMAGE_PATH = "./C_logo.png"
