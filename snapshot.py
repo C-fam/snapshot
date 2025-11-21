@@ -65,6 +65,7 @@ async def send_friendly_error(interaction: discord.Interaction, err: Exception):
 WALLET_SHEET_MAP = {1: "wallet_log", 2: "wallet_log2", 3: "wallet_log3"}
 ALL_WALLET_SHEETS = ["wallet_log", "wallet_log2", "wallet_log3"]
 MASTER_SHEET = "wallet_master"  # 唯一ウォレットの保管先
+ADD_ROLE_SHEET = "add_role"     # ロール付与用シート
 
 _ws_cache: Dict[str, gspread.Worksheet] = {}
 _values_cache: Dict[Tuple[str, str], Any] = {}  # (sheet_name, "all") -> values
@@ -236,27 +237,41 @@ class SnapshotCog(commands.Cog):
 
             while True:
                 await progress_message.edit(content=f"Now reading page {page}...")
-                params = {"module": module, "action": action, "contractaddress": contract_address,
-                          "page": page, "offset": offset, "apikey": API_KEY}
+                params = {
+                    "module": module,
+                    "action": action,
+                    "contractaddress": contract_address,
+                    "page": page,
+                    "offset": offset,
+                    "apikey": API_KEY
+                }
                 response = requests.get(base_url, params=params)
                 if response.status_code != 200:
                     error_count += 1
-                    if error_count >= max_consecutive_errors: break
-                    time.sleep(0.5); continue
+                    if error_count >= max_consecutive_errors:
+                        break
+                    time.sleep(0.5)
+                    continue
                 data = response.json()
                 if data.get("status") != "1":
                     error_count += 1
-                    if error_count >= max_consecutive_errors: break
-                    time.sleep(0.5); continue
+                    if error_count >= max_consecutive_errors:
+                        break
+                    time.sleep(0.5)
+                    continue
                 else:
                     error_count = 0
                 result_list = data.get("result")
-                if not result_list: break
+                if not result_list:
+                    break
                 for holder in result_list:
                     all_holders.append((holder["TokenHolderAddress"], float(holder["TokenHolderQuantity"])))
-                    if len(all_holders) >= max_holders: break
-                if len(all_holders) >= max_holders or len(result_list) < offset: break
-                page += 1; time.sleep(0.5)
+                    if len(all_holders) >= max_holders:
+                        break
+                if len(all_holders) >= max_holders or len(result_list) < offset:
+                    break
+                page += 1
+                time.sleep(0.5)
 
             total_supply = int(sum(q for _, q in all_holders))
             total_holders = len(all_holders)
@@ -267,13 +282,22 @@ class SnapshotCog(commands.Cog):
                 writer.writerow([address, str(int(q))])
             csv_buffer.seek(0)
 
-            summary = (f"Contract Address: {contract_address}\n"
-                       f"Total Holders: {total_holders} (up to {max_holders})\n"
-                       f"Total Supply: {total_supply}\n\nYour CSV file is attached below.")
-            sheets_call(worksheet.append_row, [str(interaction.user), contract_address, str(total_holders), str(total_supply)], value_input_option="RAW")
+            summary = (
+                f"Contract Address: {contract_address}\n"
+                f"Total Holders: {total_holders} (up to {max_holders})\n"
+                f"Total Supply: {total_supply}\n\nYour CSV file is attached below."
+            )
+            sheets_call(
+                worksheet.append_row,
+                [str(interaction.user), contract_address, str(total_holders), str(total_supply)],
+                value_input_option="RAW"
+            )
             await progress_message.edit(content="Snapshot completed! Sending file...")
-            await interaction.followup.send(content=summary, ephemeral=True,
-                                            file=discord.File(fp=io.StringIO(csv_buffer.getvalue()), filename="holderList.csv"))
+            await interaction.followup.send(
+                content=summary,
+                ephemeral=True,
+                file=discord.File(fp=io.StringIO(csv_buffer.getvalue()), filename="holderList.csv")
+            )
         except Exception as e:
             await send_friendly_error(interaction, e)
 
@@ -287,8 +311,13 @@ class RoleExport(commands.Cog):
     )
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(role="Primary role", role2="(Optional) Additional role", role3="(Optional) Additional role")
-    async def export_role_members(self, interaction: discord.Interaction, role: discord.Role,
-                                  role2: discord.Role | None = None, role3: discord.Role | None = None):
+    async def export_role_members(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+        role2: discord.Role | None = None,
+        role3: discord.Role | None = None
+    ):
         print(f"[export_role_members] called by {interaction.user} in guild {interaction.guild_id}")
         await interaction.response.defer(ephemeral=True)
         print("[export_role_members] deferred")
@@ -318,9 +347,16 @@ class RoleExport(commands.Cog):
                 w.writerow([m.name, str(m.id), ",".join(sorted(matched_map.get(m.id, [])))])
 
             buf.seek(0)
-            file = discord.File(fp=io.StringIO(buf.getvalue()), filename=f"members_{'-'.join([r.name for r in roles])}.csv")
+            file = discord.File(
+                fp=io.StringIO(buf.getvalue()),
+                filename=f"members_{'-'.join([r.name for r in roles])}.csv"
+            )
             print(f"[export_role_members] exporting {len(member_set)} members")
-            await interaction.followup.send(content=f"Exported {len(member_set)} members.", ephemeral=True, file=file)
+            await interaction.followup.send(
+                content=f"Exported {len(member_set)} members.",
+                ephemeral=True,
+                file=file
+            )
         except discord.Forbidden:
             print("[export_role_members] Forbidden: missing Server Members Intent or permissions.")
             await interaction.followup.send(content="Missing Server Members Intent.", ephemeral=True)
@@ -330,7 +366,8 @@ class RoleExport(commands.Cog):
 
 # ========= Wallet Hub (single command) =========
 def _sheet_from_button_number(n: int) -> str:
-    if n not in WALLET_SHEET_MAP: raise ValueError("button_number must be 1, 2 or 3")
+    if n not in WALLET_SHEET_MAP:
+        raise ValueError("button_number must be 1, 2 or 3")
     return WALLET_SHEET_MAP[n]
 
 class ConfirmChangeView(discord.ui.View):
@@ -342,7 +379,14 @@ class ConfirmChangeView(discord.ui.View):
 
     @discord.ui.button(label="Confirm change", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RegisterOrChangeWalletModal(self.sheet_name, preset_wallet=self.current_wallet, is_change=True, user_name=self.user_name))
+        await interaction.response.send_modal(
+            RegisterOrChangeWalletModal(
+                self.sheet_name,
+                preset_wallet=self.current_wallet,
+                is_change=True,
+                user_name=self.user_name
+            )
+        )
 
 class RegisterOrChangeWalletModal(discord.ui.Modal):
     def __init__(self, sheet_name: str, preset_wallet: str = "", is_change: bool = False, user_name: str = ""):
@@ -353,7 +397,8 @@ class RegisterOrChangeWalletModal(discord.ui.Modal):
         self.wallet_input = discord.ui.TextInput(
             label="Wallet Address",
             placeholder=preset_wallet if preset_wallet else "Enter your wallet address",
-            required=True, max_length=100
+            required=True,
+            max_length=100
         )
         self.add_item(self.wallet_input)
 
@@ -391,7 +436,12 @@ class WalletHubView(discord.ui.View):
             raise RuntimeError("No binding for this message.")
         return binding[2]
 
-    async def _maybe_auto_enroll_from_master(self, sheet: str, user_name: str, user_id: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    async def _maybe_auto_enroll_from_master(
+        self,
+        sheet: str,
+        user_name: str,
+        user_id: str
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
         m_name, m_wallet = get_master_wallet(user_id)
         if not m_wallet:
             return False, None, None
@@ -412,7 +462,8 @@ class WalletHubView(discord.ui.View):
                 await interaction.response.send_message(
                     content=f"📝 Already submitted here.\nUser: {s_name}\nWallet: {s_wallet}",
                     ephemeral=True
-                ); return
+                )
+                return
 
             m_name, m_wallet = get_master_wallet(user_id)
             if m_wallet:
@@ -420,9 +471,17 @@ class WalletHubView(discord.ui.View):
                 await interaction.response.send_message(
                     content=f"✅ Synced from your master record.\nUser: {m_name or user_name}\nWallet: {m_wallet}",
                     ephemeral=True
-                ); return
+                )
+                return
 
-            await interaction.response.send_modal(RegisterOrChangeWalletModal(sheet, preset_wallet="", is_change=False, user_name=user_name))
+            await interaction.response.send_modal(
+                RegisterOrChangeWalletModal(
+                    sheet,
+                    preset_wallet="",
+                    is_change=False,
+                    user_name=user_name
+                )
+            )
         except Exception as e:
             await send_friendly_error(interaction, e)
 
@@ -435,24 +494,34 @@ class WalletHubView(discord.ui.View):
             ws = _get_ws(sh, sheet, create=True)
             s_name, s_wallet = _lookup_wallet_in_sheet(ws, user_id)
             if s_wallet:
-                await interaction.response.send_message(content=f"User: {s_name}\nWallet: {s_wallet}", ephemeral=True); return
+                await interaction.response.send_message(
+                    content=f"User: {s_name}\nWallet: {s_wallet}",
+                    ephemeral=True
+                )
+                return
 
             enrolled, name, wal = await self._maybe_auto_enroll_from_master(sheet, user_name, user_id)
             if enrolled:
                 await interaction.response.send_message(
                     content=f"✅ Enrolled here from your master record.\nUser: {name}\nWallet: {wal}",
                     ephemeral=True
-                ); return
+                )
+                return
 
             m_name, m_wallet = get_master_wallet(user_id)
             if m_wallet:
                 await interaction.response.send_message(
-                    content=(f"Not registered in this list yet.\n"
-                             f"Master record:\nUser: {m_name}\nWallet: {m_wallet}"),
+                    content=(
+                        "Not registered in this list yet.\n"
+                        f"Master record:\nUser: {m_name}\nWallet: {m_wallet}"
+                    ),
                     ephemeral=True
                 )
             else:
-                await interaction.response.send_message(content="No wallet found. Please register first.", ephemeral=True)
+                await interaction.response.send_message(
+                    content="No wallet found. Please register first.",
+                    ephemeral=True
+                )
         except Exception as e:
             await send_friendly_error(interaction, e)
 
@@ -474,17 +543,23 @@ class WalletHubView(discord.ui.View):
                 m_name, m_wallet = get_master_wallet(user_id)
                 if m_wallet:
                     await interaction.response.send_message(
-                        content=(f"Not registered in this list yet.\n"
-                                 f"Master record:\nUser: {m_name}\nWallet: {m_wallet}"),
+                        content=(
+                            "Not registered in this list yet.\n"
+                            f"Master record:\nUser: {m_name}\nWallet: {m_wallet}"
+                        ),
                         ephemeral=True
                     )
                 else:
-                    await interaction.response.send_message(content="No wallet found. Please register first.", ephemeral=True)
+                    await interaction.response.send_message(
+                        content="No wallet found. Please register first.",
+                        ephemeral=True
+                    )
                 return
 
             msg = f"Current wallet: {s_wallet}\nProceed to change?"
             await interaction.response.send_message(
-                content=msg, ephemeral=True,
+                content=msg,
+                ephemeral=True,
                 view=ConfirmChangeView(sheet, current_wallet=s_wallet, user_name=s_name or user_name)
             )
         except Exception as e:
@@ -503,28 +578,41 @@ class WalletHub(commands.Cog):
         button_number="1=wallet_log, 2=wallet_log2, 3=wallet_log3",
         edit_if_exists="If a binding exists, refresh its buttons instead of error (default: False)"
     )
-    async def register_wallet(self, interaction: discord.Interaction, channel: discord.TextChannel,
-                              button_number: app_commands.Range[int, 1, 3],
-                              edit_if_exists: bool = False):
+    async def register_wallet(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        button_number: app_commands.Range[int, 1, 3],
+        edit_if_exists: bool = False
+    ):
         await interaction.response.defer(ephemeral=True)
         try:
             sheet_name = _sheet_from_button_number(button_number)
             exists = _is_sheet_already_bound(interaction.guild_id, sheet_name)
 
             if exists and not edit_if_exists:
-                await interaction.followup.send(content=f"❌ Binding already exists for {sheet_name}.", ephemeral=True)
+                await interaction.followup.send(
+                    content=f"❌ Binding already exists for {sheet_name}.",
+                    ephemeral=True
+                )
                 return
 
             if exists and edit_if_exists:
                 rec = _get_binding_record(interaction.guild_id, sheet_name)
                 if not rec:
-                    await interaction.followup.send(content="Binding record not found. Please re-create.", ephemeral=True)
+                    await interaction.followup.send(
+                        content="Binding record not found. Please re-create.",
+                        ephemeral=True
+                    )
                     return
                 try:
                     target_ch = channel if channel.id == rec["channel_id"] else await bot.fetch_channel(rec["channel_id"])
                     target_msg = await target_ch.fetch_message(rec["message_id"])
                     await target_msg.edit(view=WalletHubView())
-                    await interaction.followup.send(content=f"✅ Refreshed buttons for {sheet_name}.", ephemeral=True)
+                    await interaction.followup.send(
+                        content=f"✅ Refreshed buttons for {sheet_name}.",
+                        ephemeral=True
+                    )
                 except Exception as e:
                     await send_friendly_error(interaction, e)
                 return
@@ -547,7 +635,10 @@ class WalletHub(commands.Cog):
             else:
                 msg = await channel.send(embed=embed, view=view)
             _add_binding(interaction.guild_id, channel.id, msg.id, sheet_name)
-            await interaction.followup.send(content=f"✅ Posted wallet hub in {channel.mention} (bound to {sheet_name}).", ephemeral=True)
+            await interaction.followup.send(
+                content=f"✅ Posted wallet hub in {channel.mention} (bound to {sheet_name}).",
+                ephemeral=True
+            )
 
         except Exception as e:
             await send_friendly_error(interaction, e)
@@ -566,18 +657,198 @@ class AdminDiagnostics(commands.Cog):
         try:
             bindings = _list_bindings_for_guild(interaction.guild_id)
             if not bindings:
-                await interaction.followup.send(content="No bindings found in this server.", ephemeral=True); return
-            embed = discord.Embed(title="Current Wallet Button Bindings",
-                                  description="Active bindings for this server.",
-                                  color=0x4BB543)
+                await interaction.followup.send(
+                    content="No bindings found in this server.",
+                    ephemeral=True
+                )
+                return
+            embed = discord.Embed(
+                title="Current Wallet Button Bindings",
+                description="Active bindings for this server.",
+                color=0x4BB543
+            )
             for b in bindings:
                 embed.add_field(
                     name=b["sheet_name"],
-                    value=f"Channel: <#{b['channel_id']}>\nChannelID: `{b['channel_id']}`\nMessageID: `{b['message_id']}`\nCreated: `{b['created_at']}`",
+                    value=(
+                        f"Channel: <#{b['channel_id']}>\n"
+                        f"ChannelID: `{b['channel_id']}`\n"
+                        f"MessageID: `{b['message_id']}`\n"
+                        f"Created: `{b['created_at']}`"
+                    ),
                     inline=False
                 )
             embed.set_footer(text="Use /register_wallet (admin) to add/refresh bindings.")
             await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await send_friendly_error(interaction, e)
+
+# ========= NEW: apply roles from add_role sheet =========
+class ApplySheetRoles(commands.Cog):
+    def __init__(self, bot): self.bot = bot
+
+    @app_commands.command(
+        name="apply_sheet_roles",
+        description="Admin only: grant roles based on snapshot_bot_log.add_role sheet."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def apply_sheet_roles(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if interaction.guild is None:
+                await interaction.followup.send(
+                    content="This command must be used in a server.",
+                    ephemeral=True
+                )
+                return
+
+            guild = interaction.guild
+
+            # メンバーキャッシュをなるべく埋める
+            try:
+                await asyncio.wait_for(guild.chunk(), timeout=5)
+            except Exception as e:
+                print(f"[apply_sheet_roles] guild.chunk skipped: {repr(e)}")
+
+            # シート読み込み（毎回最新を取りたいのでキャッシュをクリア）
+            _values_cache.pop((ADD_ROLE_SHEET, "all"), None)
+            try:
+                ws = _get_ws(sh, ADD_ROLE_SHEET, create=False)
+            except WorksheetNotFound:
+                await interaction.followup.send(
+                    content=f"Sheet '{ADD_ROLE_SHEET}' not found in snapshot_bot_log.",
+                    ephemeral=True
+                )
+                return
+
+            rows = _get_all_values(ws)
+            if not rows or len(rows) <= 1:
+                await interaction.followup.send(
+                    content="No data rows found in add_role sheet.",
+                    ephemeral=True
+                )
+                return
+
+            total_rows = 0
+            assigned = 0
+            already_had = 0
+            member_not_found = 0
+            role_not_found = 0
+            errors = 0
+
+            # 1行目はヘッダー
+            for row_index, row in enumerate(rows[1:], start=2):
+                # 期待される形式: [Name, Discord Id, Points, Tier, Role Id, ...]
+                if len(row) < 5:
+                    continue
+
+                name = (row[0] or "").strip()
+                discord_id_str = (row[1] or "").strip()
+                role_id_str = (row[4] or "").strip()
+
+                if not discord_id_str or not role_id_str:
+                    continue
+
+                try:
+                    member_id = int(discord_id_str)
+                    role_id = int(role_id_str)
+                except ValueError:
+                    # 数値に変換できない場合はスキップ
+                    status_text = "invalid_ids"
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (invalid_ids): {repr(e2)}")
+                    continue
+
+                total_rows += 1
+                status_text = ""
+
+                # メンバー取得
+                member = guild.get_member(member_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(member_id)
+                    except Exception:
+                        member_not_found += 1
+                        status_text = "member_not_found"
+                        try:
+                            sheets_call(ws.update_cell, row_index, 6, status_text)
+                        except Exception as e2:
+                            print(f"[apply_sheet_roles] error writing status (member_not_found): {repr(e2)}")
+                        continue
+
+                # ロール取得
+                role = guild.get_role(role_id)
+                if role is None:
+                    role_not_found += 1
+                    status_text = "role_not_found"
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (role_not_found): {repr(e2)}")
+                    continue
+
+                # すでにロールを持っているか
+                if role in member.roles:
+                    already_had += 1
+                    status_text = "already_has_role"
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (already_has_role): {repr(e2)}")
+                    continue
+
+                # ロール付与
+                try:
+                    await member.add_roles(
+                        role,
+                        reason=f"Applied from add_role sheet by {interaction.user}"
+                    )
+                    assigned += 1
+                    status_text = "assigned"
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (assigned): {repr(e2)}")
+                    # Rate limit 緩和のために少しスリープ（大規模ギルド対策）
+                    await asyncio.sleep(0.2)
+                except discord.Forbidden as e:
+                    errors += 1
+                    status_text = f"error: {repr(e)}"
+                    print(f"[apply_sheet_roles] Forbidden adding role {role_id} to {member_id}: {repr(e)}")
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (Forbidden): {repr(e2)}")
+                except discord.HTTPException as e:
+                    errors += 1
+                    status_text = f"error: {repr(e)}"
+                    print(f"[apply_sheet_roles] HTTPException: {repr(e)}")
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (HTTPException): {repr(e2)}")
+                except Exception as e:
+                    errors += 1
+                    status_text = f"error: {repr(e)}"
+                    print(f"[apply_sheet_roles] unexpected error: {repr(e)}")
+                    try:
+                        sheets_call(ws.update_cell, row_index, 6, status_text)
+                    except Exception as e2:
+                        print(f"[apply_sheet_roles] error writing status (unexpected): {repr(e2)}")
+
+            summary = (
+                "Finished applying roles from add_role sheet.\n"
+                f"Processed rows: {total_rows}\n"
+                f"Roles granted: {assigned}\n"
+                f"Already had role: {already_had}\n"
+                f"Member not found: {member_not_found}\n"
+                f"Role not found in this guild: {role_not_found}\n"
+                f"Errors during add_roles: {errors}"
+            )
+            await interaction.followup.send(content=summary, ephemeral=True)
+
         except Exception as e:
             await send_friendly_error(interaction, e)
 
@@ -587,6 +858,7 @@ async def setup_bot():
     await bot.add_cog(RoleExport(bot))
     await bot.add_cog(WalletHub(bot))
     await bot.add_cog(AdminDiagnostics(bot))
+    await bot.add_cog(ApplySheetRoles(bot))
     await bot.tree.sync()
 
 @bot.event
