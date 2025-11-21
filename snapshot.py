@@ -307,7 +307,7 @@ class RoleExport(commands.Cog):
 
     @app_commands.command(
         name="export_role_members",
-        description="Admin only: export username & uid of members having the specified role(s) (CSV, ephemeral)."
+        description="Admin only: export members with specified role(s) as CSV (ephemeral)."
     )
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(role="Primary role", role2="(Optional) Additional role", role3="(Optional) Additional role")
@@ -570,13 +570,13 @@ class WalletHub(commands.Cog):
 
     @app_commands.command(
         name="register_wallet",
-        description="Admin only: Post (or refresh) a wallet hub bound to a specific sheet (1=wallet_log, 2=wallet_log2, 3=wallet_log3)."
+        description="Admin only: post or refresh a wallet hub."
     )
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
         channel="Target channel",
         button_number="1=wallet_log, 2=wallet_log2, 3=wallet_log3",
-        edit_if_exists="If a binding exists, refresh its buttons instead of error (default: False)"
+        edit_if_exists="If binding exists, refresh buttons instead of error (default: False)"
     )
     async def register_wallet(
         self,
@@ -649,7 +649,7 @@ class AdminDiagnostics(commands.Cog):
 
     @app_commands.command(
         name="check_sheet_binding",
-        description="Admin only: show bound wallet sheets and their channel/message IDs in this server."
+        description="Admin only: show bound wallet sheets and their channel/message IDs."
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def check_sheet_binding(self, interaction: discord.Interaction):
@@ -689,7 +689,7 @@ class ApplySheetRoles(commands.Cog):
 
     @app_commands.command(
         name="apply_sheet_roles",
-        description="Admin only: grant roles based on snapshot_bot_log.add_role sheet."
+        description="Admin only: grant roles based on add_role sheet."
     )
     @app_commands.checks.has_permissions(administrator=True)
     async def apply_sheet_roles(self, interaction: discord.Interaction):
@@ -769,7 +769,7 @@ class ApplySheetRoles(commands.Cog):
                 if member is None:
                     try:
                         member = await guild.fetch_member(member_id)
-                    except Exception:
+                    except Exception as e_fetch:
                         member_not_found += 1
                         status_text = "member_not_found"
                         try:
@@ -813,26 +813,26 @@ class ApplySheetRoles(commands.Cog):
                         print(f"[apply_sheet_roles] error writing status (assigned): {repr(e2)}")
                     # Rate limit 緩和のために少しスリープ（大規模ギルド対策）
                     await asyncio.sleep(0.2)
-                except discord.Forbidden as e:
+                except discord.Forbidden as e_forbidden:
                     errors += 1
-                    status_text = f"error: {repr(e)}"
-                    print(f"[apply_sheet_roles] Forbidden adding role {role_id} to {member_id}: {repr(e)}")
+                    status_text = f"error: {repr(e_forbidden)}"
+                    print(f"[apply_sheet_roles] Forbidden adding role {role_id} to {member_id}: {repr(e_forbidden)}")
                     try:
                         sheets_call(ws.update_cell, row_index, 6, status_text)
                     except Exception as e2:
                         print(f"[apply_sheet_roles] error writing status (Forbidden): {repr(e2)}")
-                except discord.HTTPException as e:
+                except discord.HTTPException as e_http:
                     errors += 1
-                    status_text = f"error: {repr(e)}"
-                    print(f"[apply_sheet_roles] HTTPException: {repr(e)}")
+                    status_text = f"error: {repr(e_http)}"
+                    print(f"[apply_sheet_roles] HTTPException: {repr(e_http)}")
                     try:
                         sheets_call(ws.update_cell, row_index, 6, status_text)
                     except Exception as e2:
                         print(f"[apply_sheet_roles] error writing status (HTTPException): {repr(e2)}")
-                except Exception as e:
+                except Exception as e_unknown:
                     errors += 1
-                    status_text = f"error: {repr(e)}"
-                    print(f"[apply_sheet_roles] unexpected error: {repr(e)}")
+                    status_text = f"error: {repr(e_unknown)}"
+                    print(f"[apply_sheet_roles] unexpected error: {repr(e_unknown)}")
                     try:
                         sheets_call(ws.update_cell, row_index, 6, status_text)
                     except Exception as e2:
@@ -859,7 +859,8 @@ async def setup_bot():
     await bot.add_cog(WalletHub(bot))
     await bot.add_cog(AdminDiagnostics(bot))
     await bot.add_cog(ApplySheetRoles(bot))
-    await bot.tree.sync()
+    cmds = await bot.tree.sync()
+    print(f"Synced {len(cmds)} commands (global)")
 
 @bot.event
 async def on_ready():
